@@ -700,7 +700,7 @@ async def save_checkpoint_and_get_sampling_client(
             )
             return training_client.create_sampling_client(path_dict["sampler_path"]), metrics
         else:
-            return await training_client.save_weights_and_get_sampling_client_async(), metrics
+            return await training_client.save_weights_and_get_sampling_client_async(name=f"{i_batch:06d}"), metrics
 
 
 @scope

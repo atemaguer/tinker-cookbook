@@ -135,6 +135,7 @@ class Config:
     dataset_configs: List[DistillationDatasetConfig]
     model_name: str
     max_tokens: int
+    temperature: float = 1.0  # Changing sampling temperature is not generally recommended; does not currently play well with KL penalty
     compute_post_kl: bool = False
     evaluator_builders: list[SamplingClientEvaluatorBuilder] = chz.field(default_factory=list)
     lora_rank: int = 32
@@ -313,6 +314,7 @@ async def do_sync_training(
                             sampling_client,
                             builder,
                             max_tokens=cfg.max_tokens,
+                            temperature=cfg.temperature,
                             do_remove_constant_reward_groups=False,
                         ),
                         name=f"sample_task_{i}",
