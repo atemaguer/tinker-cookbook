@@ -69,10 +69,10 @@ from tinker_cookbook.rl.types import (
     Trajectory,
     TrajectoryGroup,
 )
-from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
+from tinker_cookbook.tokenizer_utils import Tokenizer
 from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.misc_utils import safezip, timed
-from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
+from tinker_cookbook.utils.trace import scope, trace_init
 
 # Import evaluator
 from tinker_cookbook.eval.outreach_evaluator import (
@@ -319,11 +319,6 @@ def load_recruiting_problems(
         import traceback
         traceback.print_exc()
         return None
-
-
-PROBLEM_LOADER_MAP = {
-    "recruiting": load_recruiting_problems,
-}
 
 
 # ============================================================================
@@ -610,20 +605,16 @@ async def main(cfg: Config):
     fewshot_examples = get_fewshot_examples(cfg.dataset_name, cfg.num_fewshot_examples)
     question_suffix = ""  # No suffix needed for recruiting messages
 
-    # Load dataset
-    if cfg.dataset_name == "recruiting":
-        train_problems = load_recruiting_problems(
-            candidates_path=cfg.candidates_path,
-            split="train",
-        )
-    else:
-        loader = PROBLEM_LOADER_MAP.get(cfg.dataset_name)
-        if loader is None:
-            raise ValueError(f"Unknown dataset: {cfg.dataset_name}")
-        train_problems = loader("train")
-
-    if train_problems is None:
-        raise ValueError(f"Could not load train split for {cfg.dataset_name}")
+    # Load dataset (only recruiting is supported)
+    if cfg.dataset_name != "recruiting":
+        raise ValueError(f"Unknown dataset: {cfg.dataset_name}. Only 'recruiting' is supported.")
+    
+    train_problems = load_recruiting_problems(
+        candidates_path=cfg.candidates_path,
+        split="train",
+    )
+    if not train_problems:
+        raise ValueError(f"Could not load train split for {cfg.dataset_name} (empty or missing)")
 
     # Shuffle
     import random
@@ -821,7 +812,6 @@ class CLIConfig:
     # Model configuration
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     lora_rank: int = 128
-    renderer_name: str | None = None
     load_checkpoint_path: str | None = None
 
     # Teacher configuration
