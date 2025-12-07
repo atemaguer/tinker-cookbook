@@ -344,18 +344,29 @@ async def incorporate_kl_penalty(
     
     KL = student_logprobs - teacher_logprobs (reverse KL)
     Advantages are adjusted by negative reverse KL to push student toward teacher.
+    
+    IMPORTANT: We only compare logprobs for RESPONSE tokens (where mask=1), not prompt tokens.
+    The datum's target_tokens includes shifted prompt tokens, so we must filter using the mask.
     """
-    # Build teacher sequences: teacher prompt (with few-shot) + student's generated response
-    # The student's response tokens are in the datum's target_tokens
+    # Build teacher sequences: teacher prompt (with few-shot) + ONLY response tokens
+    # The mask indicates which positions are response tokens (mask=1) vs prompt tokens (mask=0)
     teacher_sequence_inputs_D = []
+    response_token_counts_D = []  # Track how many response tokens per datum
+    
     for datum, env in safezip(data_D, envs_D):
         # Get teacher prompt (includes few-shot examples)
         teacher_prompt = env.get_teacher_prompt()
-        # Append all the response tokens the student generated
+        
+        # Extract ONLY response tokens (where mask=1), not the shifted prompt tokens
         target_tokens = datum.loss_fn_inputs["target_tokens"].data
+        mask = datum.loss_fn_inputs["mask"].data
+        response_tokens = [int(tok) for tok, m in zip(target_tokens, mask) if m == 1]
+        response_token_counts_D.append(len(response_tokens))
+        
+        # Build teacher sequence: teacher_prompt + response_tokens_only
         teacher_sequence = teacher_prompt
-        for token in target_tokens:
-            teacher_sequence = teacher_sequence.append_int(int(token))
+        for token in response_tokens:
+            teacher_sequence = teacher_sequence.append_int(token)
         teacher_sequence_inputs_D.append(teacher_sequence)
     
     # Compute the teacher's logprobs for each element of the batch
@@ -367,31 +378,42 @@ async def incorporate_kl_penalty(
     )
     
     # The reverse KL is computed as KL[p||q] = log p - log q, where
-    #   - p: sampled_logprobs (student)
-    #   - q: teacher_logprobs (on response tokens only)
+    #   - p: sampled_logprobs (student, for response tokens only)
+    #   - q: teacher_logprobs (for response tokens only)
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
     
     # Extract teacher logprobs for response tokens only
     # Teacher sequence = [teacher_prompt] + [response_tokens]
-    # Logprobs are offset by 1, so logprobs[i] is for token[i] given tokens[0:i]
-    # We want the logprobs for the response tokens, which are at the end
+    # The last `num_response_tokens` logprobs correspond to the response tokens
     reverse_kl = []
-    for datum, teacher_logprobs, sampled_logprobs, mask in safezip(
-        data_D, teacher_logprobs_D, sampled_logprobs_D, float_masks
+    for datum, teacher_logprobs, sampled_logprobs, mask, num_response_tokens in safezip(
+        data_D, teacher_logprobs_D, sampled_logprobs_D, float_masks, response_token_counts_D
     ):
-        num_response_tokens = len(sampled_logprobs)
-        # Teacher logprobs for response: last num_response_tokens entries
-        # Note: logprobs are offset by 1, so we take from index -num_response_tokens to end
-        teacher_response_logprobs = torch.tensor(teacher_logprobs[-num_response_tokens:])
-        kl = (sampled_logprobs - teacher_response_logprobs) * mask
-        reverse_kl.append(kl)
+        # Teacher logprobs for response tokens: last num_response_tokens entries
+        teacher_response_logprobs = torch.tensor(teacher_logprobs[-num_response_tokens:]) if num_response_tokens > 0 else torch.tensor([])
+        
+        # Student logprobs for response tokens: extract where mask=1
+        student_response_logprobs = sampled_logprobs[mask == 1]
+        
+        # Compute KL for response tokens only
+        if num_response_tokens > 0:
+            kl_response = student_response_logprobs - teacher_response_logprobs
+        else:
+            kl_response = torch.tensor([])
+        
+        # Create full KL tensor with zeros for prompt positions (to match original shape for advantage update)
+        kl_full = torch.zeros_like(sampled_logprobs)
+        kl_full[mask == 1] = kl_response
+        reverse_kl.append(kl_full)
     
     total_kl = 0.0
     total_tokens = 0.0
+    total_student_entropy = 0.0
+    total_teacher_entropy = 0.0
     
-    for i, datum in enumerate(data_D):
-        # The advantage is the negative reverse KL
+    for i, (datum, num_response_tokens) in enumerate(safezip(data_D, response_token_counts_D)):
+        # The advantage is the negative reverse KL (pushes student toward teacher)
         kl_advantages = -kl_penalty_coef * float_masks[i] * reverse_kl[i]
         if kl_discount_factor > 0:
             kl_advantages = torch.tensor(
@@ -401,15 +423,29 @@ async def incorporate_kl_penalty(
             datum.loss_fn_inputs["advantages"].to_torch() + kl_advantages
         )
         
-        # Accumulate metrics
+        # Accumulate metrics (only for response tokens)
+        mask = float_masks[i]
         total_kl += reverse_kl[i].sum().item()
-        total_tokens += float_masks[i].sum().item()
+        total_tokens += mask.sum().item()
+        
+        # Track entropy (negative log prob) for diagnostics
+        student_logprobs = sampled_logprobs_D[i][mask == 1]
+        if num_response_tokens > 0:
+            teacher_logprobs_response = torch.tensor(teacher_logprobs_D[i][-num_response_tokens:])
+            total_student_entropy += (-student_logprobs).sum().item()
+            total_teacher_entropy += (-teacher_logprobs_response).sum().item()
     
-    # Compute average reverse KL over the batch for logging
+    # Compute average metrics over the batch
     avg_kl = total_kl / total_tokens if total_tokens > 0 else 0.0
+    avg_student_entropy = total_student_entropy / total_tokens if total_tokens > 0 else 0.0
+    avg_teacher_entropy = total_teacher_entropy / total_tokens if total_tokens > 0 else 0.0
     
-    logger.info(f"KL penalty: total_kl={total_kl:.4f}, total_tokens={total_tokens:.0f}, avg_kl={avg_kl:.4f}")
-    return {"teacher_kl": float(avg_kl)}
+    logger.info(f"KL penalty: avg_kl={avg_kl:.4f}, student_entropy={avg_student_entropy:.4f}, teacher_entropy={avg_teacher_entropy:.4f}")
+    return {
+        "teacher_kl": float(avg_kl),
+        "student_entropy": float(avg_student_entropy),
+        "teacher_entropy": float(avg_teacher_entropy),
+    }
 
 
 # ============================================================================
