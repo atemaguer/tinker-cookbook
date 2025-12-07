@@ -53,23 +53,55 @@ def render_profile(c: dict, include_instructions: bool = True) -> str:
         c: Candidate dict from candidates.json
         include_instructions: If True, wrap with task instructions to match 
                               few-shot format used in training
+    
+    Field mapping from candidates.json:
+        - skills_core OR skills → Skills
+        - projects OR highlights → Projects (accomplishments/achievements)
+        - recent_experience OR current_title + experience_years → Experience
+        - summary OR specialization + current_title → Summary
+        - title OR target_role_title → Target role
+        - seniority (may not exist in all records)
     """
+    # Build summary from available fields
+    summary = c.get("summary")
+    if not summary:
+        # Construct from specialization and current_title
+        specialization = c.get("specialization", "")
+        current_title = c.get("current_title", "")
+        exp_years = c.get("experience_years", "")
+        
+        parts = []
+        if current_title:
+            parts.append(current_title)
+        if specialization:
+            parts.append(f"specializing in {specialization}")
+        if exp_years:
+            parts.append(f"with {exp_years} years experience")
+        summary = ", ".join(parts) if parts else None
+    
+    # Get role title - try both field names
+    role_title = c.get("title") or c.get("target_role_title") or "Unknown Role"
+    
     profile_parts = [
         f"Name: {c.get('name')}",
-        f"Target role: {c.get('title')} ({c.get('target_role_url')})",
+        f"Target role: {role_title} ({c.get('target_role_url')})",
         f"Location: {c.get('location')} | Timezone: {c.get('timezone')}",
-        f"Seniority: {c.get('seniority')} | Domain: {c.get('domain')}",
-        f"Summary: {c.get('summary')}",
+        f"Seniority: {c.get('seniority', 'Not specified')} | Domain: {c.get('domain')}",
+        f"Summary: {summary or 'Not provided'}",
     ]
 
-    skills = ", ".join(c.get("skills_core", []))
+    # Skills - try both field names
+    skills_list = c.get("skills_core") or c.get("skills") or []
+    skills = ", ".join(skills_list)
     if skills:
         profile_parts.append(f"Skills: {skills}")
 
-    projects = c.get("projects") or []
+    # Projects/Highlights - accomplishments the model should reference
+    projects = c.get("projects") or c.get("highlights") or []
     if projects:
         profile_parts.append("Projects:\n- " + "\n- ".join(projects))
 
+    # Experience - try structured format first, then fall back to simple format
     exp = c.get("recent_experience") or []
     if exp:
         bullets = []
@@ -78,6 +110,15 @@ def render_profile(c: dict, include_instructions: bool = True) -> str:
             hl = "; ".join(highlights)
             bullets.append(f"{role.get('title')} @ {role.get('company')} ({role.get('tenure')}): {hl}")
         profile_parts.append("Experience:\n- " + "\n- ".join(bullets))
+    else:
+        # Fall back to current_title + experience_years
+        current_title = c.get("current_title")
+        exp_years = c.get("experience_years")
+        if current_title:
+            exp_str = f"{current_title}"
+            if exp_years:
+                exp_str += f" ({exp_years} years)"
+            profile_parts.append(f"Experience:\n- {exp_str}")
 
     edu = c.get("education")
     if edu:
