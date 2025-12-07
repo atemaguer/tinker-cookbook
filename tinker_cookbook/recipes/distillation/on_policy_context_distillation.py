@@ -15,21 +15,28 @@ Key concepts:
 - Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # Recruiting outreach with context distillation
+    # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
-        candidates_path=data/candidates.json \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
         lora_rank=128 \\
+        wandb_project=cookbook_context_distillation
+
+    # With custom candidates file (JSONL format with pre-formatted prompts)
+    python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        dataset=recruiting \\
+        candidates_path=data/candidates_formatted.jsonl \\
+        learning_rate=1e-4 \\
+        groups_per_batch=16 \\
         wandb_project=cookbook_context_distillation
 
     # With Llama model
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=meta-llama/Llama-3.1-8B \\
         dataset=recruiting \\
-        candidates_path=data/candidates.json \\
         learning_rate=1e-4 \\
         groups_per_batch=8 \\
         wandb_project=cookbook_context_distillation
@@ -77,7 +84,7 @@ from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
 logger = logging.getLogger(__name__)
 
 # Default path to candidates data (relative to this file's parent directory)
-DEFAULT_CANDIDATES_PATH = Path(__file__).parent.parent.parent.parent / "data" / "candidates.json"
+DEFAULT_CANDIDATES_PATH = Path(__file__).parent.parent.parent.parent / "data" / "candidates_formatted.jsonl"
 
 
 # ============================================================================
@@ -379,6 +386,27 @@ Write a personalized, professional message (under 150 words) that references the
     return prompt
 
 
+def _extract_candidate_metadata(content: str) -> dict[str, str]:
+    """Extract candidate name and target role from formatted prompt content."""
+    name = "Unknown"
+    role = "Unknown"
+    
+    # Extract name from "Name: ..." line
+    for line in content.split("\n"):
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("Target role:"):
+            # Format: "Target role: Role Title (URL)"
+            role_part = line.split(":", 1)[1].strip()
+            # Extract just the role title (before the URL)
+            if "(" in role_part:
+                role = role_part.split("(")[0].strip()
+            else:
+                role = role_part
+    
+    return {"name": name, "role": role}
+
+
 def load_recruiting_problems(
     candidates_path: str | Path | None = None,
     split: Literal["train", "test"] = "train",
@@ -386,7 +414,9 @@ def load_recruiting_problems(
     """Load recruiting candidate profiles as problem dicts.
 
     Args:
-        candidates_path: Path to candidates.json file. If None, uses default path.
+        candidates_path: Path to candidates_formatted.jsonl file. If None, uses default path.
+            Supports both JSONL (one JSON object per line with messages array) and 
+            JSON (list of candidate objects) formats.
         split: 'train' uses 80% of data, 'test' uses remaining 20%.
 
     Returns:
@@ -402,8 +432,22 @@ def load_recruiting_problems(
         return None
 
     try:
-        with open(candidates_path, "r", encoding="utf-8") as f:
-            candidates = json.load(f)
+        # Detect format based on file extension and content
+        is_jsonl = str(candidates_path).endswith(".jsonl")
+        
+        if is_jsonl:
+            # Read JSONL format (candidates_formatted.jsonl)
+            # Each line: {"messages": [{"role": "user", "content": "..."}]}
+            candidates = []
+            with open(candidates_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        candidates.append(json.loads(line))
+        else:
+            # Read JSON format (legacy candidates.json)
+            with open(candidates_path, "r", encoding="utf-8") as f:
+                candidates = json.load(f)
 
         if not isinstance(candidates, list):
             logger.warning(f"Expected list of candidates, got {type(candidates)}")
@@ -418,14 +462,46 @@ def load_recruiting_problems(
 
         # Convert to problem format
         problems = []
-        for candidate in candidates:
-            prompt = format_candidate_prompt(candidate)
-            problems.append({
-                "question": prompt,
-                "candidate_id": candidate.get("id", "unknown"),
-                "candidate_name": candidate.get("name", "Unknown"),
-                "target_role": candidate.get("title", "Unknown"),
-            })
+        for i, candidate in enumerate(candidates):
+            if is_jsonl:
+                # JSONL format: extract prompt from messages
+                messages = candidate.get("messages", [])
+                if not messages:
+                    logger.warning(f"Skipping candidate {i}: no messages found")
+                    continue
+                
+                # Get the user message content (the formatted prompt)
+                user_message = next(
+                    (m for m in messages if m.get("role") == "user"), 
+                    None
+                )
+                if user_message is None:
+                    logger.warning(f"Skipping candidate {i}: no user message found")
+                    continue
+                
+                prompt = user_message.get("content", "")
+                if not prompt:
+                    logger.warning(f"Skipping candidate {i}: empty content")
+                    continue
+                
+                # Extract metadata from the prompt content
+                metadata = _extract_candidate_metadata(prompt)
+                
+                problems.append({
+                    "question": prompt,
+                    "candidate_id": f"candidate_{i}",
+                    "candidate_name": metadata["name"],
+                    "target_role": metadata["role"],
+                })
+            else:
+                # Legacy JSON format: format the candidate data
+                prompt = format_candidate_prompt(candidate)
+                problems.append({
+                    "question": prompt,
+                    "candidate_id": candidate.get("id", f"candidate_{i}"),
+                    "candidate_name": candidate.get("name", "Unknown"),
+                    "target_role": candidate.get("title", "Unknown"),
+                })
 
         logger.info(f"Loaded {len(problems)} recruiting problems from {candidates_path}")
         return problems
