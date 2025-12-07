@@ -836,6 +836,7 @@ async def main(cfg: Config):
     logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher")
 
     # Create evaluator if rubric exists
+    # IMPORTANT: Use test split (last 20%) to avoid evaluating on training data
     evaluator = None
     rubric_path = Path(cfg.rubric_path) if cfg.rubric_path else DEFAULT_RUBRIC_PATH
     candidates_path = Path(cfg.candidates_path) if cfg.candidates_path else DEFAULT_CANDIDATES_PATH
@@ -843,11 +844,20 @@ async def main(cfg: Config):
     if rubric_path.exists() and candidates_path.exists():
         try:
             rubric = load_rubric(rubric_path)
-            eval_dataset = build_eval_dataset(candidates_path, limit=cfg.eval_limit)
+            
+            # Load ALL examples first, then take test split (last 20%)
+            all_eval_data = build_eval_dataset(candidates_path, limit=None)
+            split_idx = int(len(all_eval_data) * 0.8)
+            test_data = all_eval_data[split_idx:]  # Use test split
+            
+            # Apply eval_limit to test set
+            if cfg.eval_limit is not None and cfg.eval_limit < len(test_data):
+                test_data = test_data[:cfg.eval_limit]
+            
             renderer_name = model_info.get_recommended_renderer_name(cfg.model_name)
             
             evaluator = OutboundEvaluator(
-                dataset=eval_dataset,
+                dataset=test_data,
                 rubric=rubric,
                 renderer_name=renderer_name,
                 model_name=cfg.model_name,
@@ -855,7 +865,7 @@ async def main(cfg: Config):
                 temperature=cfg.temperature,
                 verbose=False,  # Don't print individual results during training
             )
-            logger.info(f"Created evaluator with {len(eval_dataset)} examples from {candidates_path}")
+            logger.info(f"Created evaluator with {len(test_data)} examples from TEST split of {candidates_path}")
         except Exception as e:
             logger.warning(f"Failed to create evaluator: {e}")
             evaluator = None
