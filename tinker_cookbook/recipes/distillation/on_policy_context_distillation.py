@@ -84,11 +84,19 @@ from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.misc_utils import safezip, timed
 from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
 
+# Import evaluator
+from tinker_cookbook.eval.outreach_evaluator import (
+    OutboundEvaluator,
+    build_dataset_from_formatted_jsonl as build_eval_dataset,
+    load_json as load_rubric,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default paths (relative to this file's parent directory)
 DEFAULT_CANDIDATES_PATH = Path(__file__).parent.parent.parent.parent / "data" / "candidates_formatted.jsonl"
 DEFAULT_FEWSHOT_PATH = Path(__file__).parent.parent.parent.parent / "data" / "fewshot_examples.jsonl"
+DEFAULT_RUBRIC_PATH = Path(__file__).parent.parent.parent.parent / "data" / "rubric.json"
 
 
 # ============================================================================
@@ -633,6 +641,8 @@ class Config:
     wandb_name: str | None = None
 
     eval_every: int = 5
+    eval_limit: int = 10  # Number of examples to evaluate (grading is slow)
+    rubric_path: str | None = None  # Path to rubric.json for grading
     save_every: int = 5
     load_checkpoint_path: str | None = None
     base_url: str | None = None
@@ -825,6 +835,36 @@ async def main(cfg: Config):
     logger.info(f"Will train for {total_steps} steps ({num_epochs} epochs)")
     logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher")
 
+    # Create evaluator if rubric exists
+    evaluator = None
+    rubric_path = Path(cfg.rubric_path) if cfg.rubric_path else DEFAULT_RUBRIC_PATH
+    candidates_path = Path(cfg.candidates_path) if cfg.candidates_path else DEFAULT_CANDIDATES_PATH
+    
+    if rubric_path.exists() and candidates_path.exists():
+        try:
+            rubric = load_rubric(rubric_path)
+            eval_dataset = build_eval_dataset(candidates_path, limit=cfg.eval_limit)
+            renderer_name = model_info.get_recommended_renderer_name(cfg.model_name)
+            
+            evaluator = OutboundEvaluator(
+                dataset=eval_dataset,
+                rubric=rubric,
+                renderer_name=renderer_name,
+                model_name=cfg.model_name,
+                max_tokens=cfg.max_tokens,
+                temperature=cfg.temperature,
+                verbose=False,  # Don't print individual results during training
+            )
+            logger.info(f"Created evaluator with {len(eval_dataset)} examples from {candidates_path}")
+        except Exception as e:
+            logger.warning(f"Failed to create evaluator: {e}")
+            evaluator = None
+    else:
+        if not rubric_path.exists():
+            logger.warning(f"Rubric not found at {rubric_path}, skipping eval")
+        if not candidates_path.exists():
+            logger.warning(f"Candidates not found at {candidates_path}, skipping eval")
+
     # Initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
         training_client, start_batch, cfg.log_path, cfg.save_every
@@ -844,6 +884,18 @@ async def main(cfg: Config):
             "progress/done_frac": (i_step + 1) / total_steps,
         }
         t_start = time.time()
+
+        # Run evaluation every eval_every steps
+        if evaluator is not None and cfg.eval_every > 0 and i_step % cfg.eval_every == 0:
+            with timed("run_evals", metrics):
+                try:
+                    eval_metrics = await evaluator(sampling_client)
+                    # Log eval metrics with "eval/" prefix
+                    for k, v in eval_metrics.items():
+                        metrics[f"eval/{k}"] = v
+                    logger.info(f"Eval at step {i_step}: {eval_metrics}")
+                except Exception as e:
+                    logger.warning(f"Evaluation failed at step {i_step}: {e}")
 
         # Get batch (cycles through dataset)
         env_group_builders = dataset.get_batch(i_batch)
@@ -975,6 +1027,8 @@ class CLIConfig:
 
     # Evaluation and checkpointing
     eval_every: int = 5
+    eval_limit: int = 10  # Number of examples to grade per eval (grading is slow)
+    rubric_path: str | None = None  # Path to rubric.json
     save_every: int = 5
 
     # Service configuration
@@ -1029,6 +1083,8 @@ async def cli_main(cli_config: CLIConfig):
         wandb_project=cli_config.wandb_project,
         wandb_name=wandb_name,
         eval_every=cli_config.eval_every,
+        eval_limit=cli_config.eval_limit,
+        rubric_path=cli_config.rubric_path,
         save_every=cli_config.save_every,
         load_checkpoint_path=cli_config.load_checkpoint_path,
         base_url=cli_config.base_url,
