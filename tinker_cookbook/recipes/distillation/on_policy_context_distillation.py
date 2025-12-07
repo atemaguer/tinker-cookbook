@@ -18,17 +18,30 @@ Example usage:
     # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
         lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # With custom candidates file (JSONL format with pre-formatted prompts)
+    # With pre-formatted JSONL (prompts already built in messages array)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
         candidates_path=data/candidates_formatted.jsonl \\
+        learning_rate=1e-4 \\
+        groups_per_batch=16 \\
+        wandb_project=cookbook_context_distillation
+
+    # With raw candidates.json + roles.json (like outreach_evaluator.py)
+    python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
+        dataset=recruiting \\
+        candidates_path=data/candidates.json \\
+        roles_path=data/roles.json \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
         wandb_project=cookbook_context_distillation
@@ -36,6 +49,7 @@ Example usage:
     # With Llama model
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=meta-llama/Llama-3.1-8B \\
+        teacher_model=meta-llama/Llama-3.1-8B \\
         dataset=recruiting \\
         learning_rate=1e-4 \\
         groups_per_batch=8 \\
@@ -323,101 +337,170 @@ class ContextDistillationDataset(RLDataset):
 
 
 # ============================================================================
-# Data loading utilities
+# Data loading utilities (pattern from outreach_evaluator.py)
 # ============================================================================
 
 
-def format_candidate_prompt(candidate: dict[str, Any]) -> str:
-    """Format a candidate profile into a prompt for outreach message generation."""
-    # Extract key fields
-    name = candidate.get("name", "Unknown")
-    title = candidate.get("title", "Unknown Role")
-    location = candidate.get("location", "Unknown")
-    skills = candidate.get("skills_core", [])
-    projects = candidate.get("projects", [])
-    experience = candidate.get("recent_experience", [])
-    education = candidate.get("education", "")
-    openness = candidate.get("openness", "")
-    job_excerpt = candidate.get("job_description_excerpt", "")
-
-    # Format skills
-    skills_str = ", ".join(skills[:6]) if skills else "Not specified"
-
-    # Format recent experience
-    exp_lines = []
-    for exp in experience[:2]:
-        company = exp.get("company", "")
-        exp_title = exp.get("title", "")
-        tenure = exp.get("tenure", "")
-        highlights = exp.get("highlights", [])
-        if company and exp_title:
-            exp_lines.append(f"  - {exp_title} at {company} ({tenure})")
-            for h in highlights[:2]:
-                exp_lines.append(f"    • {h}")
-    experience_str = "\n".join(exp_lines) if exp_lines else "Not specified"
-
-    # Format projects
-    projects_str = "\n".join(f"  • {p}" for p in projects[:3]) if projects else "Not specified"
-
-    # Build the prompt
-    prompt = f"""Write a LinkedIn outreach message for this candidate and role:
-
-**Candidate Profile:**
-- Name: {name}
-- Target Role Interest: {title}
-- Location: {location}
-- Timezone Preference: {candidate.get("timezone", "Flexible")}
-- Seniority: {candidate.get("seniority", "mid")}
-- Core Skills: {skills_str}
-- Education: {education}
-- Openness to Relocation: {openness}
-
-**Recent Experience:**
-{experience_str}
-
-**Notable Projects:**
-{projects_str}
-
-**Target Role (excerpt from job description):**
-{job_excerpt[:800] if job_excerpt else "Not available"}
-
-Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them."""
-
-    return prompt
+def load_json(path: Path) -> Any:
+    """Load a JSON file."""
+    with path.open("r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def _extract_candidate_metadata(content: str) -> dict[str, str]:
-    """Extract candidate name and target role from formatted prompt content."""
-    name = "Unknown"
-    role = "Unknown"
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Load a JSONL file (one JSON object per line)."""
+    items = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    return items
+
+
+# Instruction to append to prompts that only contain candidate profile data
+LINKEDIN_DM_INSTRUCTION = """
+
+Write a personalized, professional LinkedIn DM (under 150 words) that:
+- References their specific background and experience
+- Explains why this role at xAI might interest them
+- Has a clear call-to-action
+- Sounds human, not templated"""
+
+
+def build_dataset_from_formatted_jsonl(
+    data: list[dict[str, Any]],
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build dataset from pre-formatted JSONL with messages array.
     
-    # Extract name from "Name: ..." line
-    for line in content.split("\n"):
-        if line.startswith("Name:"):
-            name = line.split(":", 1)[1].strip()
-        elif line.startswith("Target role:"):
-            # Format: "Target role: Role Title (URL)"
-            role_part = line.split(":", 1)[1].strip()
-            # Extract just the role title (before the URL)
-            if "(" in role_part:
-                role = role_part.split("(")[0].strip()
-            else:
-                role = role_part
+    Expected format: {"messages": [{"role": "user", "content": "..."}]}
     
-    return {"name": name, "role": role}
+    If the prompt doesn't contain an explicit instruction to write a LinkedIn DM,
+    we append the standard instruction.
+    """
+    items: list[dict[str, Any]] = []
+    for idx, record in enumerate(data):
+        if limit and idx >= limit:
+            break
+        
+        messages = record.get("messages", [])
+        if not messages:
+            logger.warning(f"Skipping record {idx}: no messages found")
+            continue
+        
+        # Get the user message content (the formatted prompt)
+        user_message = next(
+            (m for m in messages if m.get("role") == "user"),
+            None
+        )
+        if user_message is None:
+            logger.warning(f"Skipping record {idx}: no user message found")
+            continue
+        
+        prompt = user_message.get("content", "")
+        if not prompt:
+            logger.warning(f"Skipping record {idx}: empty content")
+            continue
+        
+        # Check if prompt already has an instruction for what to write
+        # If not, append the LinkedIn DM instruction
+        prompt_lower = prompt.lower()
+        has_instruction = any(keyword in prompt_lower for keyword in [
+            "write a linkedin",
+            "write a personalized",
+            "write a professional message",
+            "craft a message",
+            "compose a message",
+        ])
+        
+        if not has_instruction:
+            prompt = LINKEDIN_DM_INSTRUCTION + "\n\n" + prompt
+        
+        # Extract metadata from prompt content
+        name = "Unknown"
+        role = "Unknown"
+        for line in prompt.split("\n"):
+            if line.startswith("Name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("Target role:"):
+                role_part = line.split(":", 1)[1].strip()
+                if "(" in role_part:
+                    role = role_part.split("(")[0].strip()
+                else:
+                    role = role_part
+        
+        items.append({
+            "question": prompt,
+            "candidate_id": f"candidate_{idx}",
+            "candidate_name": name,
+            "target_role": role,
+        })
+    
+    return items
+
+
+def build_dataset_from_candidates_json(
+    candidates: list[dict[str, Any]],
+    roles: list[dict[str, Any]] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Build dataset from raw candidates JSON, optionally matching with roles.
+    
+    Pattern aligned with outreach_evaluator.py build_dataset().
+    """
+    items: list[dict[str, Any]] = []
+    for idx, cand in enumerate(candidates):
+        if limit and idx >= limit:
+            break
+        
+        # Match role by URL if roles provided
+        role_text = ""
+        if roles:
+            role = next(
+                (r for r in roles if r.get("absolute_url") == cand.get("target_role_url")),
+                None
+            )
+            if role:
+                role_text = role.get("content_text") or role.get("content_html") or ""
+        
+        # Fall back to job description excerpt from candidate
+        if not role_text:
+            role_text = cand.get("job_description_excerpt") or ""
+        
+        # Build prompt (similar to outreach_evaluator.py)
+        prompt = (
+            "You are a recruiter crafting a concise, respectful LinkedIn DM to a candidate about a role.\n"
+            "Use the candidate profile and the job description below. Keep it <130 words, clear CTA, no fluff.\n\n"
+            f"Candidate Profile:\n{json.dumps(cand, indent=2)}\n\n"
+            f"Job Description:\n{role_text}\n"
+        )
+        
+        items.append({
+            "question": prompt,
+            "candidate_id": cand.get("id", f"candidate_{idx}"),
+            "candidate_name": cand.get("name", "Unknown"),
+            "target_role": cand.get("title", "Unknown"),
+        })
+    
+    return items
 
 
 def load_recruiting_problems(
     candidates_path: str | Path | None = None,
+    roles_path: str | Path | None = None,
     split: Literal["train", "test"] = "train",
+    limit: int | None = None,
 ) -> list[dict[str, Any]] | None:
     """Load recruiting candidate profiles as problem dicts.
 
     Args:
-        candidates_path: Path to candidates_formatted.jsonl file. If None, uses default path.
-            Supports both JSONL (one JSON object per line with messages array) and 
-            JSON (list of candidate objects) formats.
+        candidates_path: Path to candidates file. If None, uses default path.
+            Supports both JSONL (pre-formatted with messages array) and 
+            JSON (raw candidate objects) formats.
+        roles_path: Optional path to roles.json for matching with candidates.
         split: 'train' uses 80% of data, 'test' uses remaining 20%.
+        limit: Optional limit on number of candidates to load.
 
     Returns:
         List of problem dicts with 'question' key containing the formatted prompt.
@@ -432,82 +515,47 @@ def load_recruiting_problems(
         return None
 
     try:
-        # Detect format based on file extension and content
+        # Detect format based on file extension
         is_jsonl = str(candidates_path).endswith(".jsonl")
         
         if is_jsonl:
-            # Read JSONL format (candidates_formatted.jsonl)
-            # Each line: {"messages": [{"role": "user", "content": "..."}]}
-            candidates = []
-            with open(candidates_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        candidates.append(json.loads(line))
+            # Load JSONL format (candidates_formatted.jsonl)
+            data = load_jsonl(candidates_path)
         else:
-            # Read JSON format (legacy candidates.json)
-            with open(candidates_path, "r", encoding="utf-8") as f:
-                candidates = json.load(f)
+            # Load JSON format (candidates.json)
+            data = load_json(candidates_path)
 
-        if not isinstance(candidates, list):
-            logger.warning(f"Expected list of candidates, got {type(candidates)}")
+        if not isinstance(data, list):
+            logger.warning(f"Expected list of candidates, got {type(data)}")
             return None
 
         # Split into train/test (80/20)
-        split_idx = int(len(candidates) * 0.8)
+        split_idx = int(len(data) * 0.8)
         if split == "train":
-            candidates = candidates[:split_idx]
+            data = data[:split_idx]
         else:
-            candidates = candidates[split_idx:]
+            data = data[split_idx:]
 
-        # Convert to problem format
-        problems = []
-        for i, candidate in enumerate(candidates):
-            if is_jsonl:
-                # JSONL format: extract prompt from messages
-                messages = candidate.get("messages", [])
-                if not messages:
-                    logger.warning(f"Skipping candidate {i}: no messages found")
-                    continue
-                
-                # Get the user message content (the formatted prompt)
-                user_message = next(
-                    (m for m in messages if m.get("role") == "user"), 
-                    None
-                )
-                if user_message is None:
-                    logger.warning(f"Skipping candidate {i}: no user message found")
-                    continue
-                
-                prompt = user_message.get("content", "")
-                if not prompt:
-                    logger.warning(f"Skipping candidate {i}: empty content")
-                    continue
-                
-                # Extract metadata from the prompt content
-                metadata = _extract_candidate_metadata(prompt)
-                
-                problems.append({
-                    "question": prompt,
-                    "candidate_id": f"candidate_{i}",
-                    "candidate_name": metadata["name"],
-                    "target_role": metadata["role"],
-                })
-            else:
-                # Legacy JSON format: format the candidate data
-                prompt = format_candidate_prompt(candidate)
-                problems.append({
-                    "question": prompt,
-                    "candidate_id": candidate.get("id", f"candidate_{i}"),
-                    "candidate_name": candidate.get("name", "Unknown"),
-                    "target_role": candidate.get("title", "Unknown"),
-                })
+        # Build dataset based on format
+        if is_jsonl:
+            problems = build_dataset_from_formatted_jsonl(data, limit=limit)
+        else:
+            # Optionally load roles for matching
+            roles = None
+            if roles_path:
+                roles_path = Path(roles_path)
+                if roles_path.exists():
+                    roles = load_json(roles_path)
+            
+            problems = build_dataset_from_candidates_json(data, roles=roles, limit=limit)
 
         logger.info(f"Loaded {len(problems)} recruiting problems from {candidates_path}")
         return problems
 
     except Exception as e:
         logger.warning(f"Failed to load candidates from {candidates_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -674,6 +722,7 @@ class Config:
 
     dataset_name: str = "recruiting"
     candidates_path: str | None = None
+    roles_path: str | None = None
     num_fewshot_examples: int | None = None
     groups_per_batch: int = 16
     group_size: int = 4
@@ -858,6 +907,7 @@ async def main(cfg: Config):
     if cfg.dataset_name == "recruiting":
         train_problems = load_recruiting_problems(
             candidates_path=cfg.candidates_path,
+            roles_path=cfg.roles_path,
             split="train",
         )
     else:
@@ -1020,6 +1070,7 @@ class CLIConfig:
     # Dataset configuration
     dataset: str = "recruiting"
     candidates_path: str | None = None
+    roles_path: str | None = None
     num_fewshot_examples: int | None = None
 
     # Training hyperparameters
@@ -1082,6 +1133,7 @@ async def cli_main(cli_config: CLIConfig):
         learning_rate=cli_config.learning_rate,
         dataset_name=cli_config.dataset,
         candidates_path=cli_config.candidates_path,
+        roles_path=cli_config.roles_path,
         num_fewshot_examples=cli_config.num_fewshot_examples,
         groups_per_batch=cli_config.groups_per_batch,
         group_size=cli_config.group_size,
