@@ -45,42 +45,23 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import tinker
-from openai import AsyncOpenAI
-from pydantic import BaseModel, ConfigDict
 from tinker import types
 from tinker_cookbook import renderers
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
+from tinker_cookbook.eval.outreach_grader import (
+    DEFAULT_GRADER_MODEL,
+    GradeResult,
+    OutreachGrader,
+    Penalty,
+    SectionScore,
+    load_rubric,
+)
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 
-DEFAULT_GRADER_MODEL = "gpt-4.1"
-
-
-class SectionScore(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    section_id: str
-    score: float
-    comments: str
-
-
-class Penalty(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reason: str
-    score: float
-
-
-class GradedSections(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    section_scores: List[SectionScore]
-    penalties: List[Penalty]  # Empty list if no penalties
-
-
 def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load JSON file - wrapper for backwards compatibility."""
+    return load_rubric(path)
 
 
 def build_dataset_from_formatted_jsonl(jsonl_path: Path, limit: int | None = None) -> List[Dict[str, Any]]:
@@ -201,17 +182,21 @@ class OutboundEvaluator(SamplingClientEvaluator):
     ):
         self.dataset = dataset
         self.rubric = rubric
-        self.grader_model = grader_model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.verbose = verbose
         # Default to empty convo_prefix to match training (student has no system message)
         self.convo_prefix = convo_prefix if convo_prefix is not None else []
 
-        self.grader_timeout = grader_timeout
         tokenizer = get_tokenizer(model_name)
         self.renderer = renderers.get_renderer(name=renderer_name, tokenizer=tokenizer)
-        self.client = AsyncOpenAI(timeout=grader_timeout)
+        
+        # Use modular grader
+        self.grader = OutreachGrader(
+            rubric=rubric,
+            grader_model=grader_model,
+            grader_timeout=grader_timeout,
+        )
 
     async def __call__(self, sampling_client: tinker.SamplingClient) -> Dict[str, float]:
         sampling_params = types.SamplingParams(
@@ -257,73 +242,29 @@ class OutboundEvaluator(SamplingClientEvaluator):
             if self.verbose:
                 _print_result(idx + 1, len(self.dataset), dm_text, 0.0, "Empty or invalid draft; skipped grading.", [], [])
 
-        # Grade all valid drafts in parallel
+        # Grade all valid drafts in parallel using the modular grader
         if drafts:
             print(f"{_DIM}[grader] scoring {len(drafts)} examples in parallel ...{_RESET}", flush=True)
-            grade_tasks = [self.grade_async(dm_clean, prompt) for _, dm_clean, prompt in drafts]
-            grade_results = await asyncio.gather(*grade_tasks)
+            messages_to_grade = [dm_clean for _, dm_clean, _ in drafts]
+            prompts_for_grading = [prompt for _, _, prompt in drafts]
+            grade_results = await self.grader.grade_batch_async(messages_to_grade, prompts_for_grading)
             print(f"[grader] scoring complete.", flush=True)
 
-            for (idx, dm_clean, _), (score, justification, section_scores, penalties) in zip(drafts, grade_results):
-                scores[idx] = score
+            for (idx, dm_clean, _), result in zip(drafts, grade_results):
+                scores[idx] = result.total_score
                 if self.verbose:
-                    _print_result(idx + 1, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
+                    _print_result(
+                        idx + 1,
+                        len(self.dataset),
+                        dm_clean,
+                        result.total_score,
+                        result.justification,
+                        result.section_scores,
+                        result.penalties,
+                    )
 
         avg = sum(scores) / len(scores) if scores else 0.0
         return {"outreach_score": avg}
-
-    async def grade_async(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
-        grader_instructions = self.rubric.get("grader_instructions", "")
-        
-        system_prompt = (
-            "You are a HARSH grader evaluating recruiter outreach messages. "
-            "Follow the provided rubric EXACTLY. Count specific criteria met and penalties triggered.\n\n"
-            f"{grader_instructions}\n\n"
-            "Output JSON with:\n"
-            "- section_scores: array with one entry per rubric section (section_id, score, comments explaining which criteria were met)\n"
-            "- penalties: array of ALL applicable penalties (reason quoting the specific penalty, score as negative number), or empty array if none\n\n"
-            "Be literal: if you see template phrases like 'impressive background' or 'extensive experience', apply the penalty. "
-            "If the message doesn't explicitly acknowledge a mismatch, don't give credit for implying it.\n"
-            "Do not include a total score. Do not add extra fields."
-        )
-        user_payload = {
-            "rubric": self.rubric,
-            "prompt_context": prompt,
-            "message": dm,
-        }
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-        ]
-        resp = await self.client.beta.chat.completions.parse(
-            model=self.grader_model,
-            messages=messages,  # type: ignore[arg-type]
-            response_format=GradedSections,
-        )
-        parsed_content = resp.choices[0].message.parsed
-        content = parsed_content.model_dump_json() if parsed_content is not None else (resp.choices[0].message.content or "")
-        try:
-            graded = GradedSections.model_validate_json(content)
-            section_scores = graded.section_scores
-            penalties = graded.penalties
-
-            total_sections = sum(float(s.score) for s in section_scores)
-            total_penalties = sum(float(p.score) for p in penalties)
-            total_score = total_sections + total_penalties
-
-            comments = [f"{s.section_id}: {s.comments}" for s in section_scores if s.comments]
-            penalty_notes = [p.reason for p in penalties if p.reason]
-            
-            justification_parts = []
-            if comments:
-                justification_parts.append("; ".join(comments))
-            if penalty_notes:
-                justification_parts.append(f"Penalties: {', '.join(penalty_notes)}")
-            justification = " | ".join(justification_parts) or "Section scores aggregated with penalties."
-
-            return total_score, justification, section_scores, penalties
-        except Exception:
-            return 0.0, "Grader response parsing failed.", [], []
 
 
 def main():

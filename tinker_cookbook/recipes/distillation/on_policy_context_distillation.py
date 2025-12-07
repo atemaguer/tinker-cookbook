@@ -1,37 +1,43 @@
 """
-On-policy context distillation for recruiting outreach messages.
+On-policy context distillation for recruiting outreach messages with feedback augmentation.
 
-This script combines prompt distillation and on-policy distillation:
+This script combines prompt distillation and on-policy distillation with feedback:
 - Student: Receives only the candidate profile + job description (NO examples)
-- Teacher: Receives few-shot examples of good outreach messages + candidate/job info
+- Teacher: Receives few-shot examples + student's attempt + grader feedback + reprompt
 
-The goal is to train the student to internalize high-quality outreach patterns,
-learning to write effective LinkedIn DMs as if it had seen examples, without actually having them.
+The feedback-augmented approach:
+1. Student generates: y ~ s(|x) where x is the candidate profile
+2. Grader evaluates: F = Judge(y, x) providing structured feedback
+3. Teacher sees: [fewshot examples, x, y, F, x] - feedback-augmented context
+4. Student learns from teacher's improved response
 
 Key concepts:
-- Context asymmetry: Teacher sees few-shot examples, student does not
+- Context asymmetry: Teacher sees few-shot examples + feedback, student does not
+- Feedback augmentation: Teacher learns from student's mistakes via grader feedback
 - On-policy sampling: Student generates messages without context
-- KL penalty: Student learns to match teacher's distribution (which has context)
+- KL penalty: Student learns to match teacher's distribution (which has context + feedback)
 - Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
+    # Recruiting outreach with feedback-augmented context distillation
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
+        use_feedback=true \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
         lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # With Llama model
+    # Without feedback (original behavior)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=meta-llama/Llama-3.1-8B \\
-        teacher_model=meta-llama/Llama-3.1-8B \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
+        use_feedback=false \\
         learning_rate=1e-4 \\
-        groups_per_batch=8 \\
+        groups_per_batch=16 \\
         wandb_project=cookbook_context_distillation
 """
 
@@ -74,10 +80,12 @@ from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.misc_utils import safezip, timed
 from tinker_cookbook.utils.trace import scope, trace_init
 
-# Import evaluator
-from tinker_cookbook.eval.outreach_evaluator import (
-    OutboundEvaluator,
-    load_json as load_rubric,
+# Import evaluator and grader
+from tinker_cookbook.eval.outreach_evaluator import OutboundEvaluator
+from tinker_cookbook.eval.outreach_grader import (
+    GradeResult,
+    OutreachGrader,
+    load_rubric,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +155,12 @@ class ContextDistillationEnv(PromptOnlyEnv):
 
     The student receives only the problem prompt. The few-shot examples are stored
     separately and used only by the teacher for KL penalty computation.
+    
+    With feedback augmentation enabled, the teacher sees:
+    [fewshot examples, problem, student_attempt, feedback, problem again]
+    
+    This gives the teacher information about what the student tried and what
+    went wrong, allowing it to produce a better response for distillation.
     """
 
     def __init__(
@@ -163,12 +177,61 @@ class ContextDistillationEnv(PromptOnlyEnv):
         self.question_suffix = question_suffix
         # Store few-shot examples for teacher (used in KL computation)
         self.fewshot_examples = fewshot_examples
+        # Feedback augmentation fields (set later if enabled)
+        self.student_completion: str | None = None
+        self.feedback: GradeResult | None = None
 
-    def get_teacher_prompt(self) -> tinker.ModelInput:
-        """Build the teacher's prompt WITH few-shot examples."""
-        convo = self.fewshot_examples + [
-            {"role": "user", "content": self.problem + self.question_suffix},
-        ]
+    def set_feedback(self, student_completion: str, feedback: GradeResult) -> None:
+        """Set the student's completion and grader feedback for teacher context.
+        
+        Args:
+            student_completion: The student's generated message
+            feedback: GradeResult from the grader
+        """
+        self.student_completion = student_completion
+        self.feedback = feedback
+
+    def get_teacher_prompt(self, use_feedback: bool = False) -> tinker.ModelInput:
+        """Build the teacher's prompt WITH few-shot examples and optionally feedback.
+        
+        Without feedback (use_feedback=False):
+            [fewshot examples] + [problem]
+        
+        With feedback (use_feedback=True and feedback is set):
+            [fewshot examples] + [problem] + [student_attempt] + [feedback] + [problem reprompt]
+            
+        The feedback-augmented prompt structure:
+        - User: original problem
+        - Assistant: student's attempt
+        - User: feedback + reprompt with the same problem
+        
+        This gives the teacher context about what went wrong and asks it to improve.
+        """
+        problem_content = self.problem + self.question_suffix
+        
+        if use_feedback and self.student_completion is not None and self.feedback is not None:
+            # Build feedback-augmented conversation
+            # Structure: fewshot + [problem, student_attempt, feedback+reprompt]
+            feedback_text = self.feedback.to_feedback_text(include_score=True)
+            
+            # Create the feedback turn with reprompt
+            feedback_and_reprompt = (
+                f"Here is feedback on this message:\n\n{feedback_text}\n\n"
+                f"Please write an improved message that addresses this feedback:\n\n"
+                f"{problem_content}"
+            )
+            
+            convo = self.fewshot_examples + [
+                {"role": "user", "content": problem_content},
+                {"role": "assistant", "content": self.student_completion},
+                {"role": "user", "content": feedback_and_reprompt},
+            ]
+        else:
+            # Original behavior: just fewshot + problem
+            convo = self.fewshot_examples + [
+                {"role": "user", "content": problem_content},
+            ]
+        
         return self.renderer.build_generation_prompt(convo)
 
 
@@ -333,14 +396,22 @@ async def incorporate_kl_penalty(
     teacher_client: tinker.SamplingClient,
     kl_penalty_coef: float,
     kl_discount_factor: float,
+    use_feedback: bool = False,
 ) -> Dict[str, float]:
     """
     Compute reverse KL between the student (log p) and the teacher model (log q).
     
     For context distillation, the teacher sees few-shot examples while the student does not.
+    With feedback augmentation enabled, the teacher also sees the student's attempt
+    and grader feedback before producing its response.
+    
     We compute:
-    - Teacher logprobs on: [few-shot context] + [problem] + [student's response]
+    - Teacher logprobs on: [teacher context] + [student's response]
     - Student logprobs on: [problem] + [student's response]
+    
+    Where teacher context is:
+    - Without feedback: [few-shot context] + [problem]
+    - With feedback: [few-shot context] + [problem] + [student_attempt] + [feedback] + [reprompt]
     
     KL = student_logprobs - teacher_logprobs (reverse KL)
     Advantages are adjusted by negative reverse KL to push student toward teacher.
@@ -348,14 +419,14 @@ async def incorporate_kl_penalty(
     IMPORTANT: We only compare logprobs for RESPONSE tokens (where mask=1), not prompt tokens.
     The datum's target_tokens includes shifted prompt tokens, so we must filter using the mask.
     """
-    # Build teacher sequences: teacher prompt (with few-shot) + ONLY response tokens
+    # Build teacher sequences: teacher prompt (with few-shot, optionally feedback) + ONLY response tokens
     # The mask indicates which positions are response tokens (mask=1) vs prompt tokens (mask=0)
     teacher_sequence_inputs_D = []
     response_token_counts_D = []  # Track how many response tokens per datum
     
     for datum, env in safezip(data_D, envs_D):
-        # Get teacher prompt (includes few-shot examples)
-        teacher_prompt = env.get_teacher_prompt()
+        # Get teacher prompt (includes few-shot examples and optionally feedback)
+        teacher_prompt = env.get_teacher_prompt(use_feedback=use_feedback)
         
         # Extract ONLY response tokens (where mask=1), not the shifted prompt tokens
         target_tokens = datum.loss_fn_inputs["target_tokens"].data
@@ -473,6 +544,11 @@ class Config:
     seed: int = 0
     min_steps: int = 10  # Minimum number of training steps (will cycle through data if needed)
 
+    # Feedback augmentation settings
+    use_feedback: bool = False  # Enable feedback-augmented teacher context
+    grader_model: str = "gpt-4.1"  # Model used for grading/feedback
+    grader_timeout: float = 30.0  # Timeout for grader calls
+
     kl_penalty_coef: float = 1.0
     kl_discount_factor: float = 0.0
     compute_post_kl: bool = False
@@ -486,6 +562,7 @@ class Config:
 
     eval_every: int = 5
     eval_limit: int = 10  # Number of examples to evaluate (grading is slow)
+    eval_temperature: float = 0.0  # Temperature for evaluation (0 = deterministic/greedy)
     rubric_path: str | None = None  # Path to rubric.json for grading
     save_every: int = 5
     load_checkpoint_path: str | None = None
@@ -502,8 +579,13 @@ async def prepare_minibatch_with_context(
     teacher_client: tinker.SamplingClient,
     kl_penalty_coef: float,
     kl_discount_factor: float,
+    use_feedback: bool = False,
 ) -> tuple[list[tinker.Datum], dict[str, Any]]:
-    """Prepare minibatch with KL penalty against teacher."""
+    """Prepare minibatch with KL penalty against teacher.
+    
+    If use_feedback=True, the teacher context includes the student's attempt
+    and grader feedback (which should have been set on each env beforehand).
+    """
     metrics = {}
 
     # Compute trajectory metrics
@@ -530,6 +612,7 @@ async def prepare_minibatch_with_context(
                 teacher_client,
                 kl_penalty_coef,
                 kl_discount_factor,
+                use_feedback=use_feedback,
             )
         metrics.update(kl_metrics)
 
@@ -577,6 +660,79 @@ async def do_group_rollout_with_envs(
     )
 
     return trajectory_group, list(envs)  # type: ignore
+
+
+@scope
+async def generate_feedback_for_envs(
+    trajectory_groups_P: list[TrajectoryGroup],
+    envs_P_G: list[list[ContextDistillationEnv]],
+    grader: OutreachGrader,
+    renderer: renderers.Renderer,
+) -> Dict[str, float]:
+    """Generate feedback for all student completions and attach to environments.
+    
+    For each trajectory, this:
+    1. Extracts the student's completion text
+    2. Calls the grader to get feedback
+    3. Attaches the feedback to the corresponding environment
+    
+    The feedback will be used by get_teacher_prompt() when use_feedback=True.
+    
+    Returns metrics about the feedback generation (average scores, etc.)
+    """
+    # Flatten all trajectories and envs
+    all_completions: list[str] = []
+    all_prompts: list[str] = []
+    all_envs: list[ContextDistillationEnv] = []
+    
+    for traj_group, envs_G in safezip(trajectory_groups_P, envs_P_G):
+        for traj, env in safezip(traj_group.trajectories_G, envs_G):
+            # Extract student completion from trajectory
+            # Tokens are stored in each transition's action (ac.tokens)
+            completion_tokens: list[int] = []
+            for transition in traj.transitions:
+                completion_tokens.extend(transition.ac.tokens)
+            
+            if completion_tokens:
+                # Parse the response to get the text
+                messages = renderer.parse_response(completion_tokens)
+                if messages and messages[0].get("content"):
+                    completion_text = messages[0]["content"]
+                else:
+                    completion_text = ""
+            else:
+                completion_text = ""
+            
+            all_completions.append(completion_text)
+            all_prompts.append(env.problem)
+            all_envs.append(env)
+    
+    if not all_completions:
+        return {"feedback/count": 0}
+    
+    # Grade all completions in parallel
+    logger.info(f"[feedback] Generating feedback for {len(all_completions)} completions...")
+    feedback_results = await grader.grade_batch_async(all_completions, all_prompts)
+    
+    # Attach feedback to environments
+    scores = []
+    for env, completion, feedback in safezip(all_envs, all_completions, feedback_results):
+        env.set_feedback(completion, feedback)
+        scores.append(feedback.total_score)
+    
+    # Compute metrics
+    avg_score = sum(scores) / len(scores) if scores else 0.0
+    min_score = min(scores) if scores else 0.0
+    max_score = max(scores) if scores else 0.0
+    
+    logger.info(f"[feedback] Generated {len(scores)} feedbacks: avg={avg_score:.2f}, min={min_score:.2f}, max={max_score:.2f}")
+    
+    return {
+        "feedback/count": len(scores),
+        "feedback/avg_score": avg_score,
+        "feedback/min_score": min_score,
+        "feedback/max_score": max_score,
+    }
 
 
 @scope
@@ -677,14 +833,24 @@ async def main(cfg: Config):
     logger.info(f"Will train for {total_steps} steps ({num_epochs} epochs)")
     logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher")
 
-    # Create evaluator if rubric exists
+    # Create evaluator and grader if rubric exists
     # IMPORTANT: Use test split (last 20%) to avoid evaluating on training data
     evaluator = None
+    grader = None
     rubric_path = Path(cfg.rubric_path) if cfg.rubric_path else DEFAULT_RUBRIC_PATH
     
     if rubric_path.exists():
         try:
             rubric = load_rubric(rubric_path)
+            
+            # Create grader for feedback augmentation (if enabled)
+            if cfg.use_feedback:
+                grader = OutreachGrader(
+                    rubric=rubric,
+                    grader_model=cfg.grader_model,
+                    grader_timeout=cfg.grader_timeout,
+                )
+                logger.info(f"Created grader for feedback augmentation (model: {cfg.grader_model})")
             
             # Load test split using same function as training (ensures consistent split)
             test_problems = load_recruiting_problems(
@@ -708,17 +874,25 @@ async def main(cfg: Config):
                     renderer_name=renderer_name,
                     model_name=cfg.model_name,
                     max_tokens=cfg.max_tokens,
-                    temperature=cfg.temperature,
+                    temperature=cfg.eval_temperature,  # Use eval temp (0 = deterministic)
                     verbose=False,  # Don't print individual results during training
                 )
                 logger.info(f"Created evaluator with {len(test_data)} examples from TEST split")
             else:
                 logger.warning("No test data available for evaluation")
         except Exception as e:
-            logger.warning(f"Failed to create evaluator: {e}")
+            logger.warning(f"Failed to create evaluator/grader: {e}")
             evaluator = None
+            grader = None
     else:
         logger.warning(f"Rubric not found at {rubric_path}, skipping eval")
+        if cfg.use_feedback:
+            logger.warning("use_feedback=True but rubric not found - disabling feedback")
+    
+    # Validate feedback configuration
+    if cfg.use_feedback and grader is None:
+        logger.warning("use_feedback=True but grader could not be created - disabling feedback")
+        # We'll set use_feedback_effective to False in the loop
 
     # Initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
@@ -781,7 +955,19 @@ async def main(cfg: Config):
             logger.warning("No valid trajectories in batch, skipping")
             continue
 
-        # Prepare minibatch with context-aware KL
+        # Generate feedback for student completions (if enabled)
+        use_feedback_effective = cfg.use_feedback and grader is not None
+        if use_feedback_effective:
+            with timed("generate_feedback", metrics):
+                feedback_metrics = await generate_feedback_for_envs(
+                    trajectory_groups_P,
+                    envs_P_G,
+                    grader,
+                    renderer,
+                )
+            metrics.update(feedback_metrics)
+
+        # Prepare minibatch with context-aware KL (optionally with feedback)
         data_D, prepare_metrics = await prepare_minibatch_with_context(
             valid_builders,
             trajectory_groups_P,
@@ -790,6 +976,7 @@ async def main(cfg: Config):
             teacher_client,
             kl_penalty_coef=cfg.kl_penalty_coef,
             kl_discount_factor=cfg.kl_discount_factor,
+            use_feedback=use_feedback_effective,
         )
         metrics.update(prepare_metrics)
 
@@ -869,6 +1056,11 @@ class CLIConfig:
     compute_post_kl: bool = False
     min_steps: int = 10  # Minimum number of training steps
 
+    # Feedback augmentation configuration
+    use_feedback: bool = False  # Enable feedback-augmented teacher context
+    grader_model: str = "gpt-4.1"  # Model used for grading/feedback
+    grader_timeout: float = 30.0  # Timeout for grader calls
+
     # Optimizer configuration
     num_substeps: int = 1
     loss_fn: str = "importance_sampling"
@@ -881,6 +1073,7 @@ class CLIConfig:
     # Evaluation and checkpointing
     eval_every: int = 5
     eval_limit: int = 10  # Number of examples to grade per eval (grading is slow)
+    eval_temperature: float = 0.0  # Temperature for evaluation (0 = deterministic/greedy)
     rubric_path: str | None = None  # Path to rubric.json
     save_every: int = 5
 
@@ -902,8 +1095,9 @@ async def cli_main(cli_config: CLIConfig):
             if cli_config.num_fewshot_examples
             else "fullshot"
         )
+        feedback_str = "feedback" if cli_config.use_feedback else "nofeedback"
         run_name = (
-            f"context-distill-{cli_config.dataset}-{fewshot_str}-{model_name}-"
+            f"context-distill-{cli_config.dataset}-{fewshot_str}-{feedback_str}-{model_name}-"
             f"{cli_config.lora_rank}rank-{cli_config.learning_rate}lr-"
             f"{cli_config.groups_per_batch}batch-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
@@ -925,6 +1119,9 @@ async def cli_main(cli_config: CLIConfig):
         groups_per_batch=cli_config.groups_per_batch,
         group_size=cli_config.group_size,
         max_tokens=cli_config.max_tokens,
+        use_feedback=cli_config.use_feedback,
+        grader_model=cli_config.grader_model,
+        grader_timeout=cli_config.grader_timeout,
         kl_penalty_coef=cli_config.kl_penalty_coef,
         kl_discount_factor=cli_config.kl_discount_factor,
         compute_post_kl=cli_config.compute_post_kl,
@@ -936,6 +1133,7 @@ async def cli_main(cli_config: CLIConfig):
         wandb_name=wandb_name,
         eval_every=cli_config.eval_every,
         eval_limit=cli_config.eval_limit,
+        eval_temperature=cli_config.eval_temperature,
         rubric_path=cli_config.rubric_path,
         save_every=cli_config.save_every,
         load_checkpoint_path=cli_config.load_checkpoint_path,
