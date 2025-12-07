@@ -1,40 +1,42 @@
 """
-On-policy context distillation for math reasoning tasks.
+On-policy context distillation for recruiting outreach messages.
 
 This script combines prompt distillation and on-policy distillation:
-- Student: Receives only the problem prompt (NO few-shot examples)
-- Teacher: Receives few-shot examples + problem to provide KL supervision
+- Student: Receives only the candidate profile + job description (NO examples)
+- Teacher: Receives few-shot examples of good outreach messages + candidate/job info
 
-The goal is to train the student to internalize the few-shot reasoning patterns,
-learning to solve problems as if it had the few-shot context, without actually having it.
+The goal is to train the student to internalize high-quality outreach patterns,
+learning to write effective LinkedIn DMs as if it had seen examples, without actually having them.
 
 Key concepts:
 - Context asymmetry: Teacher sees few-shot examples, student does not
-- On-policy sampling: Student generates solutions without context
+- On-policy sampling: Student generates messages without context
 - KL penalty: Student learns to match teacher's distribution (which has context)
-- Context internalization: Model learns to replicate reasoning from context it never sees
+- Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # GSM8K with context distillation
+    # Recruiting outreach with context distillation
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=Qwen/Qwen3-8B-Base \\
-        dataset=gsm8k \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        dataset=recruiting \\
+        candidates_path=data/candidates.json \\
         learning_rate=1e-4 \\
-        groups_per_batch=256 \\
+        groups_per_batch=16 \\
         lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # Hendrycks MATH with context distillation
+    # With Llama model
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=Qwen/Qwen3-8B-Base \\
-        dataset=math \\
+        model_name=meta-llama/Llama-3.1-8B \\
+        dataset=recruiting \\
+        candidates_path=data/candidates.json \\
         learning_rate=1e-4 \\
-        groups_per_batch=256 \\
-        lora_rank=128 \\
+        groups_per_batch=8 \\
         wandb_project=cookbook_context_distillation
 """
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -42,26 +44,20 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Sequence, cast
 
 import chz
 import tinker
 import torch
-from datasets import Dataset, load_dataset
 from tinker_cookbook import checkpoint_utils, cli_utils, model_info, renderers
 from tinker_cookbook.display import colorize_example
 from tinker_cookbook.distillation.datasets import PromptOnlyEnv
-from tinker_cookbook.recipes.math_rl.math_env import (
-    extract_boxed,
-    extract_gsm8k_final_answer,
-)
 from tinker_cookbook.rl.data_processing import assemble_training_data, compute_advantages
 from tinker_cookbook.rl.metric_util import compute_trajectory_metrics
 from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
-from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
 from tinker_cookbook.rl.train import (
     compute_full_batch_metrics_and_get_sampling_client,
-    do_group_rollout_and_filter_constant_reward,
     save_checkpoint_and_get_sampling_client,
     train_step,
 )
@@ -70,7 +66,6 @@ from tinker_cookbook.rl.types import (
     EnvGroupBuilder,
     Metrics,
     RLDataset,
-    RLDatasetBuilder,
     Trajectory,
     TrajectoryGroup,
 )
@@ -81,118 +76,118 @@ from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
 
 logger = logging.getLogger(__name__)
 
+# Default path to candidates data (relative to this file's parent directory)
+DEFAULT_CANDIDATES_PATH = Path(__file__).parent.parent.parent.parent / "data" / "candidates.json"
+
 
 # ============================================================================
-# Few-shot examples for context distillation
+# Few-shot examples for recruiting outreach context distillation
 # ============================================================================
 
-GSM8K_FEWSHOT_EXAMPLES: list[renderers.Message] = [
+RECRUITING_FEWSHOT_EXAMPLES: list[renderers.Message] = [
     {
         "role": "user",
-        "content": (
-            "Natalia sold clips to 48 of her friends in April, and then she sold "
-            "half as many clips in May. How many clips did Natalia sell altogether "
-            "in April and May? Provide a numerical answer without units, written inside \\boxed{}."
-        ),
-    },
-    {
-        "role": "assistant",
-        "content": (
-            "Natalia sold 48 clips in April.\n"
-            "In May, she sold half as many, which is 48 / 2 = 24 clips.\n"
-            "In total, she sold 48 + 24 = 72 clips.\n"
-            "\\boxed{72}"
-        ),
-    },
-    {
-        "role": "user",
-        "content": (
-            "Weng earns $12 an hour for babysitting. Yesterday, she just did 50 "
-            "minutes of babysitting. How much did she earn? "
-            "Provide a numerical answer without units, written inside \\boxed{}."
-        ),
-    },
-    {
-        "role": "assistant",
-        "content": (
-            "Weng earns $12 per hour.\n"
-            "She worked for 50 minutes, which is 50/60 = 5/6 of an hour.\n"
-            "Her earnings are 12 × (50/60) = 12 × (5/6) = 10 dollars.\n"
-            "\\boxed{10}"
-        ),
-    },
-    {
-        "role": "user",
-        "content": (
-            "Betty is saving money for a new wallet which costs $100. Betty has only "
-            "half of the money she needs. Her parents decided to give her $15 for that "
-            "purpose, and her grandparents twice as much as her parents. How much more "
-            "money does Betty need to buy the wallet? "
-            "Provide a numerical answer without units, written inside \\boxed{}."
-        ),
-    },
-    {
-        "role": "assistant",
-        "content": (
-            "Betty needs $100 for the wallet.\n"
-            "She has half of that, which is 100 / 2 = $50.\n"
-            "Her parents give her $15.\n"
-            "Her grandparents give her twice as much as her parents: 2 × 15 = $30.\n"
-            "Total money Betty has: 50 + 15 + 30 = $95.\n"
-            "She still needs: 100 - 95 = $5.\n"
-            "\\boxed{5}"
-        ),
-    },
-]
+        "content": """Write a LinkedIn outreach message for this candidate and role:
 
-MATH_FEWSHOT_EXAMPLES: list[renderers.Message] = [
-    {
-        "role": "user",
-        "content": "How many r's are in strawberry? Write your answer in \\boxed{} format.",
+**Candidate Profile:**
+- Name: Alex Chen
+- Current Title: Senior ML Engineer at Anthropic
+- Skills: PyTorch, Transformers, RLHF, Distributed Training
+- Experience: 4 years building LLM training infrastructure
+- Location: San Francisco, CA
+
+**Target Role:**
+- Title: Member of Technical Staff, Post-training
+- Company: xAI
+- Location: Palo Alto, CA
+- Key Requirements: Experience with RLHF, large-scale training, transformer architectures
+
+Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
     },
     {
         "role": "assistant",
-        "content": (
-            "Let's spell the word out and number all the letters: "
-            "1) s 2) t 3) r 4) a 5) w 6) b 7) e 8) r 9) r 10) y. "
-            "We have r's at positions 3, 8, and 9. \\boxed{3}"
-        ),
+        "content": """Hi Alex,
+
+I came across your work at Anthropic on LLM training infrastructure—the scale and complexity of that work is impressive.
+
+We're building the post-training team at xAI, focused on RLHF and alignment at scales that push the boundaries of what's possible. Given your hands-on experience with distributed training and transformers, I think you'd thrive in our environment.
+
+What makes xAI different: flat structure, direct ownership of critical systems, and a team obsessed with moving fast. The Palo Alto commute from SF is easy, and we're flexible on hybrid arrangements.
+
+Would you be open to a quick chat this week? I'd love to share more about what we're building.
+
+Best,
+[Recruiter]""",
     },
     {
         "role": "user",
-        "content": (
-            "Find the value of $x$ if $x = \\frac{1}{1 + \\frac{1}{1 + \\frac{1}{2}}}$. "
-            "Write your answer in \\boxed{} format."
-        ),
+        "content": """Write a LinkedIn outreach message for this candidate and role:
+
+**Candidate Profile:**
+- Name: Priya Sharma
+- Current Title: Staff SRE at Google Cloud
+- Skills: Kubernetes, Observability, Networking, High-availability systems
+- Experience: 6 years scaling cloud infrastructure, led team of 8
+- Location: Seattle, WA (open to relocation)
+
+**Target Role:**
+- Title: Site Reliability Engineer - Kubernetes Platform
+- Company: xAI
+- Location: Palo Alto, CA
+- Key Requirements: Deep Kubernetes expertise, experience with GPU clusters, platform reliability
+
+Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
     },
     {
         "role": "assistant",
-        "content": (
-            "Let me work from the innermost fraction outward.\n"
-            "The innermost part is $\\frac{1}{2}$.\n"
-            "Then $1 + \\frac{1}{2} = \\frac{3}{2}$.\n"
-            "So $\\frac{1}{1 + \\frac{1}{2}} = \\frac{1}{\\frac{3}{2}} = \\frac{2}{3}$.\n"
-            "Then $1 + \\frac{2}{3} = \\frac{5}{3}$.\n"
-            "Finally, $x = \\frac{1}{\\frac{5}{3}} = \\frac{3}{5}$.\n"
-            "\\boxed{\\frac{3}{5}}"
-        ),
+        "content": """Hi Priya,
+
+Your work scaling Kubernetes at Google Cloud caught my attention—especially the observability and high-availability focus at that scale.
+
+At xAI, we're running one of the world's largest GPU clusters on Kubernetes, and we need someone who can architect reliability at that level. You'd own the platform that powers Grok's training and inference infrastructure.
+
+I noticed you're open to relocation—we offer comprehensive relo packages to Palo Alto, and the team culture here is very different from big tech: direct impact, minimal layers, engineering-driven decisions.
+
+Given your leadership experience with that 8-person team, I think you'd find the scope here exciting.
+
+Free for a 15-minute call this week to explore?
+
+Best,
+[Recruiter]""",
     },
     {
         "role": "user",
-        "content": (
-            "What is the sum of the first 10 positive integers? "
-            "Write your answer in \\boxed{} format."
-        ),
+        "content": """Write a LinkedIn outreach message for this candidate and role:
+
+**Candidate Profile:**
+- Name: Marcus Johnson
+- Current Title: Backend Engineer at Stripe
+- Skills: Go, Rust, PostgreSQL, API Design, High-throughput systems
+- Experience: 3 years building payment infrastructure
+- Location: Remote (NYC-based)
+
+**Target Role:**
+- Title: Backend Engineer - Grok Chat
+- Company: xAI
+- Location: Palo Alto, CA; San Francisco, CA
+- Key Requirements: Scalable backend systems, real-time processing, API design
+
+Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
     },
     {
         "role": "assistant",
-        "content": (
-            "The first 10 positive integers are 1, 2, 3, 4, 5, 6, 7, 8, 9, 10.\n"
-            "Using the formula for the sum of an arithmetic series: $S = \\frac{n(n+1)}{2}$\n"
-            "where $n = 10$.\n"
-            "So $S = \\frac{10 \\times 11}{2} = \\frac{110}{2} = 55$.\n"
-            "\\boxed{55}"
-        ),
+        "content": """Hi Marcus,
+
+Building payment infrastructure at Stripe means you know what "can't go down" really means—that same reliability mindset is exactly what we need on the Grok Chat backend.
+
+We're designing systems that serve millions of real-time AI conversations, with latency requirements that make the work genuinely challenging. Your Go/Rust experience and API design background would translate directly.
+
+The role is in SF/Palo Alto, but we're flexible on hybrid arrangements. Given you're currently remote in NYC, I'm happy to discuss what relocation support looks like if that's of interest.
+
+Stripe → AI infrastructure is a path several of our engineers have taken. Would you be up for a quick call to hear more about the technical challenges we're solving?
+
+Best,
+[Recruiter]""",
     },
 ]
 
@@ -201,10 +196,8 @@ def get_fewshot_examples(
     dataset_name: str, num_examples: int | None = None
 ) -> list[renderers.Message]:
     """Get few-shot examples for the specified dataset."""
-    if dataset_name == "gsm8k":
-        examples = GSM8K_FEWSHOT_EXAMPLES
-    elif dataset_name in ("math", "deepmath"):
-        examples = MATH_FEWSHOT_EXAMPLES
+    if dataset_name == "recruiting":
+        examples = RECRUITING_FEWSHOT_EXAMPLES
     else:
         raise ValueError(f"Unknown dataset for few-shot examples: {dataset_name}")
 
@@ -278,7 +271,7 @@ class ContextDistillationDataset(RLDataset):
 
     def __init__(
         self,
-        problems: list[dict[str, str]],
+        problems: list[dict[str, Any]],
         batch_size: int,
         group_size: int,
         renderer: renderers.Renderer,
@@ -327,87 +320,123 @@ class ContextDistillationDataset(RLDataset):
 # ============================================================================
 
 
-def load_gsm8k_problems(
+def format_candidate_prompt(candidate: dict[str, Any]) -> str:
+    """Format a candidate profile into a prompt for outreach message generation."""
+    # Extract key fields
+    name = candidate.get("name", "Unknown")
+    title = candidate.get("title", "Unknown Role")
+    location = candidate.get("location", "Unknown")
+    skills = candidate.get("skills_core", [])
+    projects = candidate.get("projects", [])
+    experience = candidate.get("recent_experience", [])
+    education = candidate.get("education", "")
+    openness = candidate.get("openness", "")
+    job_excerpt = candidate.get("job_description_excerpt", "")
+
+    # Format skills
+    skills_str = ", ".join(skills[:6]) if skills else "Not specified"
+
+    # Format recent experience
+    exp_lines = []
+    for exp in experience[:2]:
+        company = exp.get("company", "")
+        exp_title = exp.get("title", "")
+        tenure = exp.get("tenure", "")
+        highlights = exp.get("highlights", [])
+        if company and exp_title:
+            exp_lines.append(f"  - {exp_title} at {company} ({tenure})")
+            for h in highlights[:2]:
+                exp_lines.append(f"    • {h}")
+    experience_str = "\n".join(exp_lines) if exp_lines else "Not specified"
+
+    # Format projects
+    projects_str = "\n".join(f"  • {p}" for p in projects[:3]) if projects else "Not specified"
+
+    # Build the prompt
+    prompt = f"""Write a LinkedIn outreach message for this candidate and role:
+
+**Candidate Profile:**
+- Name: {name}
+- Target Role Interest: {title}
+- Location: {location}
+- Timezone Preference: {candidate.get("timezone", "Flexible")}
+- Seniority: {candidate.get("seniority", "mid")}
+- Core Skills: {skills_str}
+- Education: {education}
+- Openness to Relocation: {openness}
+
+**Recent Experience:**
+{experience_str}
+
+**Notable Projects:**
+{projects_str}
+
+**Target Role (excerpt from job description):**
+{job_excerpt[:800] if job_excerpt else "Not available"}
+
+Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them."""
+
+    return prompt
+
+
+def load_recruiting_problems(
+    candidates_path: str | Path | None = None,
     split: Literal["train", "test"] = "train",
-) -> list[dict[str, str]] | None:
-    """Load GSM8K problems as question/answer dicts."""
-    try:
-        ds = cast(Dataset, load_dataset("openai/gsm8k", name="main", split=split))
-        problems = []
-        for row in ds:
-            try:
-                question = row["question"]  # type: ignore
-                answer = extract_gsm8k_final_answer(row["answer"])  # type: ignore
-                problems.append({"question": question, "answer": answer})
-            except Exception as e:
-                logger.warning(f"Failed to parse GSM8K row: {e}")
-                continue
-        return problems
-    except Exception as e:
-        logger.warning(f"Could not load {split} split for GSM8K: {e}")
+) -> list[dict[str, Any]] | None:
+    """Load recruiting candidate profiles as problem dicts.
+
+    Args:
+        candidates_path: Path to candidates.json file. If None, uses default path.
+        split: 'train' uses 80% of data, 'test' uses remaining 20%.
+
+    Returns:
+        List of problem dicts with 'question' key containing the formatted prompt.
+    """
+    if candidates_path is None:
+        candidates_path = DEFAULT_CANDIDATES_PATH
+
+    candidates_path = Path(candidates_path)
+
+    if not candidates_path.exists():
+        logger.warning(f"Candidates file not found: {candidates_path}")
         return None
 
-
-def load_math_problems(
-    split: Literal["train", "test"] = "train",
-) -> list[dict[str, str]] | None:
-    """Load Hendrycks MATH problems as question/answer dicts."""
     try:
-        if split == "test":
-            ds = load_dataset("HuggingFaceH4/MATH-500", name="default", split="test")
+        with open(candidates_path, "r", encoding="utf-8") as f:
+            candidates = json.load(f)
+
+        if not isinstance(candidates, list):
+            logger.warning(f"Expected list of candidates, got {type(candidates)}")
+            return None
+
+        # Split into train/test (80/20)
+        split_idx = int(len(candidates) * 0.8)
+        if split == "train":
+            candidates = candidates[:split_idx]
         else:
-            from datasets import concatenate_datasets, get_dataset_config_names
+            candidates = candidates[split_idx:]
 
-            test_ds = load_dataset("HuggingFaceH4/MATH-500", name="default", split="test")
-            test_problems = {row["problem"] for row in test_ds}  # type: ignore
-
-            dataset_name = "EleutherAI/hendrycks_math"
-            configs = get_dataset_config_names(dataset_name)
-            pieces = []
-            for cfg in configs:
-                for s in ("train", "test"):
-                    ds_part = load_dataset(dataset_name, name=cfg, split=s)
-                    ds_part = ds_part.filter(lambda x: x["problem"] not in test_problems)
-                    pieces.append(ds_part)
-            ds = concatenate_datasets(pieces)
-
+        # Convert to problem format
         problems = []
-        for row in ds:  # type: ignore
-            try:
-                problem = row["problem"]  # type: ignore
-                answer = extract_boxed(row["solution"])  # type: ignore
-                problems.append({"question": problem, "answer": answer})
-            except Exception as e:
-                logger.warning(f"Failed to parse MATH row: {e}")
-                continue
-        return problems
-    except Exception as e:
-        logger.warning(f"Could not load {split} split for MATH: {e}")
-        return None
+        for candidate in candidates:
+            prompt = format_candidate_prompt(candidate)
+            problems.append({
+                "question": prompt,
+                "candidate_id": candidate.get("id", "unknown"),
+                "candidate_name": candidate.get("name", "Unknown"),
+                "target_role": candidate.get("title", "Unknown"),
+            })
 
-
-def load_deepmath_problems(
-    split: Literal["train", "test"] = "train",
-) -> list[dict[str, str]] | None:
-    """Load DeepMath problems as question/answer dicts."""
-    try:
-        ds = load_dataset("zwhe99/DeepMath-103K", split=split)
-        problems = []
-        for row in ds:  # type: ignore
-            question = row.get("question", "")  # type: ignore
-            answer = row.get("final_answer", "")  # type: ignore
-            if question and answer:
-                problems.append({"question": question, "answer": answer})
+        logger.info(f"Loaded {len(problems)} recruiting problems from {candidates_path}")
         return problems
+
     except Exception as e:
-        logger.warning(f"Could not load {split} split for DeepMath: {e}")
+        logger.warning(f"Failed to load candidates from {candidates_path}: {e}")
         return None
 
 
 PROBLEM_LOADER_MAP = {
-    "gsm8k": load_gsm8k_problems,
-    "math": load_math_problems,
-    "deepmath": load_deepmath_problems,
+    "recruiting": load_recruiting_problems,
 }
 
 
@@ -478,21 +507,33 @@ async def incorporate_context_kl_penalty(
     total_kl = 0.0
     total_tokens = 0
 
+    # Debug logging for first datum
+    if data_D:
+        first_response_start = response_start_positions[0]
+        first_teacher_logprobs = teacher_all_logprobs[0]
+        logger.debug(
+            f"KL debug: teacher_prompt_len={first_response_start}, "
+            f"teacher_logprobs_len={len(first_teacher_logprobs)}, "
+            f"student_logprobs_len={len(data_D[0].loss_fn_inputs['logprobs'].to_torch())}"
+        )
+
     for i, datum in enumerate(data_D):
         # Get student's logprobs for response
         student_logprobs = datum.loss_fn_inputs["logprobs"].to_torch()
         mask = datum.loss_fn_inputs["mask"].to_torch().float()
 
         # Get teacher's logprobs for response tokens
-        # teacher_all_logprobs[i] gives logprobs for all tokens
-        # We need logprobs starting from response_start_positions[i]
+        # teacher_all_logprobs[i] gives logprobs for all tokens in the sequence
+        # We need logprobs for response tokens starting from response_start_positions[i]
         response_start = response_start_positions[i]
         teacher_logprobs_full = teacher_all_logprobs[i]
 
-        # The logprobs array is offset by 1 (logprob[i] is for token[i+1])
-        # So for response starting at position P, we want logprobs[P:]
+        # The logprobs array is offset by 1: logprobs[i] = log P(token[i+1] | tokens[0:i+1])
+        # So for the first response token at position P, we need logprobs[P-1]
+        # This gives us log P(token[P] | tokens[0:P]) = log P(first_response | teacher_prompt)
+        logprob_start_idx = max(0, response_start - 1)
         teacher_response_logprobs = torch.tensor(
-            teacher_logprobs_full[response_start:]
+            teacher_logprobs_full[logprob_start_idx:]
         )
 
         # Make sure lengths match
@@ -526,7 +567,17 @@ async def incorporate_context_kl_penalty(
         total_kl += reverse_kl.sum().item()
         total_tokens += mask.sum().item()
 
+        # Debug logging for first few datums
+        if i < 2:
+            logger.debug(
+                f"KL debug datum {i}: min_len={min_len}, mask_sum={mask.sum().item():.0f}, "
+                f"student_lp_mean={student_logprobs.mean().item():.4f}, "
+                f"teacher_lp_mean={teacher_response_logprobs.mean().item():.4f}, "
+                f"kl_mean={reverse_kl.mean().item():.4f}"
+            )
+
     avg_kl = total_kl / total_tokens if total_tokens > 0 else 0.0
+    logger.info(f"Context KL: total_kl={total_kl:.4f}, total_tokens={total_tokens}, avg_kl={avg_kl:.4f}")
     return {"teacher_kl": avg_kl}
 
 
@@ -545,16 +596,19 @@ class Config:
     lora_rank: int = 128
     learning_rate: float = 1e-4
 
-    dataset_name: str = "gsm8k"
+    dataset_name: str = "recruiting"
+    candidates_path: str | None = None
     num_fewshot_examples: int | None = None
-    groups_per_batch: int = 256
+    groups_per_batch: int = 16
     group_size: int = 4
-    max_tokens: int = 4096
+    max_tokens: int = 2048
     temperature: float = 1.0
     seed: int = 0
+    min_steps: int = 10  # Minimum number of training steps (will cycle through data if needed)
 
     kl_penalty_coef: float = 1.0
     kl_discount_factor: float = 0.0
+    compute_post_kl: bool = False
 
     loss_fn: Literal["importance_sampling", "ppo"] = "importance_sampling"
     num_substeps: int = 1
@@ -563,8 +617,8 @@ class Config:
     wandb_project: str | None = None
     wandb_name: str | None = None
 
-    eval_every: int = 20
-    save_every: int = 20
+    eval_every: int = 5
+    save_every: int = 5
     load_checkpoint_path: str | None = None
     base_url: str | None = None
     enable_trace: bool = False
@@ -677,7 +731,11 @@ async def main(cfg: Config):
         if current_task is not None:
             current_task.set_name("main")
         trace_events_path = os.path.join(cfg.log_path, "trace_events.jsonl")
-        logger.info(f"Tracing enabled. Events saved to {trace_events_path}")
+        logger.info(f"Tracing is enabled. Trace events will be saved to {trace_events_path}")
+        logger.info(
+            f"Run `python tinker_cookbook/utils/trace.py {trace_events_path} trace.json` "
+            "and visualize in chrome://tracing or https://ui.perfetto.dev/"
+        )
         trace_init(output_file=trace_events_path)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -718,18 +776,20 @@ async def main(cfg: Config):
 
     # Get few-shot examples and question suffix
     fewshot_examples = get_fewshot_examples(cfg.dataset_name, cfg.num_fewshot_examples)
-    question_suffix = (
-        " Provide a numerical answer without units, written inside \\boxed{}."
-        if cfg.dataset_name == "gsm8k"
-        else " Write your answer in \\boxed{} format."
-    )
+    question_suffix = ""  # No suffix needed for recruiting messages
 
     # Load dataset
-    loader = PROBLEM_LOADER_MAP.get(cfg.dataset_name)
-    if loader is None:
-        raise ValueError(f"Unknown dataset: {cfg.dataset_name}")
+    if cfg.dataset_name == "recruiting":
+        train_problems = load_recruiting_problems(
+            candidates_path=cfg.candidates_path,
+            split="train",
+        )
+    else:
+        loader = PROBLEM_LOADER_MAP.get(cfg.dataset_name)
+        if loader is None:
+            raise ValueError(f"Unknown dataset: {cfg.dataset_name}")
+        train_problems = loader("train")
 
-    train_problems = loader("train")
     if train_problems is None:
         raise ValueError(f"Could not load train split for {cfg.dataset_name}")
 
@@ -750,8 +810,12 @@ async def main(cfg: Config):
         dataset_name=f"{cfg.dataset_name}_context_distill",
     )
 
-    num_batches = len(dataset)
-    logger.info(f"Will train on {num_batches} batches")
+    batches_per_epoch = len(dataset)
+    total_steps = max(batches_per_epoch, cfg.min_steps)
+    num_epochs = math.ceil(total_steps / batches_per_epoch) if batches_per_epoch > 0 else 1
+    
+    logger.info(f"Dataset has {batches_per_epoch} batches ({len(train_problems)} problems)")
+    logger.info(f"Will train for {total_steps} steps ({num_epochs} epochs)")
     logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher")
 
     # Initial sampling client
@@ -760,15 +824,21 @@ async def main(cfg: Config):
     )
 
     # Training loop
-    for i_batch in range(start_batch, num_batches):
+    for i_step in range(start_batch, total_steps):
+        # Cycle through dataset using modulo
+        i_batch = i_step % batches_per_epoch if batches_per_epoch > 0 else 0
+        current_epoch = i_step // batches_per_epoch if batches_per_epoch > 0 else 0
+        
         metrics = {
+            "progress/step": i_step,
             "progress/batch": i_batch,
+            "progress/epoch": current_epoch,
             "optim/lr": cfg.learning_rate,
-            "progress/done_frac": (i_batch + 1) / num_batches,
+            "progress/done_frac": (i_step + 1) / total_steps,
         }
         t_start = time.time()
 
-        # Get batch
+        # Get batch (cycles through dataset)
         env_group_builders = dataset.get_batch(i_batch)
 
         # Sample trajectories and collect environments
@@ -822,29 +892,32 @@ async def main(cfg: Config):
         # Compute full batch metrics (KL, entropy, etc.) and get new sampling client
         sampling_client, full_batch_metrics = await compute_full_batch_metrics_and_get_sampling_client(
             training_client,
-            i_batch + 1,
+            i_step + 1,
             data_D,
             training_logprobs_D,
             cfg.log_path,
             cfg.save_every,
-            do_compute_post_kl=False,
+            cfg.compute_post_kl,
         )
         metrics.update(full_batch_metrics)
 
         # Log metrics
         metrics["time/total"] = time.time() - t_start
-        ml_logger.log_metrics(metrics, step=i_batch)
+        ml_logger.log_metrics(metrics, step=i_step)
 
     # Save final checkpoint
-    if start_batch < num_batches:
-        await checkpoint_utils.save_checkpoint_async(
+    if start_batch < total_steps:
+        _ = await checkpoint_utils.save_checkpoint_async(
             training_client=training_client,
             name="final",
             log_path=cfg.log_path,
             kind="both",
-            loop_state={"batch": num_batches},
+            loop_state={"batch": total_steps},
         )
+    else:
+        logger.info("Training was already complete; nothing to do")
 
+    # Cleanup
     ml_logger.close()
     logger.info("Training completed successfully")
 
@@ -859,26 +932,29 @@ class CLIConfig:
     """Command-line configuration for on-policy context distillation."""
 
     # Model configuration
-    model_name: str = "Qwen/Qwen3-8B-Base"
+    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     lora_rank: int = 128
     renderer_name: str | None = None
     load_checkpoint_path: str | None = None
 
     # Teacher configuration
-    teacher_model: str = "Qwen/Qwen3-8B"
+    teacher_model: str = "Qwen/Qwen3-4B-Instruct-2507"
     teacher_checkpoint: str | None = None
 
     # Dataset configuration
-    dataset: str = "gsm8k"
+    dataset: str = "recruiting"
+    candidates_path: str | None = None
     num_fewshot_examples: int | None = None
 
     # Training hyperparameters
     group_size: int = 4
-    groups_per_batch: int = 256
+    groups_per_batch: int = 16
     learning_rate: float = 1e-4
-    max_tokens: int = 4096
+    max_tokens: int = 2048
     kl_penalty_coef: float = 1.0
     kl_discount_factor: float = 0.0
+    compute_post_kl: bool = False
+    min_steps: int = 10  # Minimum number of training steps
 
     # Optimizer configuration
     num_substeps: int = 1
@@ -890,8 +966,8 @@ class CLIConfig:
     wandb_name: str | None = None
 
     # Evaluation and checkpointing
-    eval_every: int = 20
-    save_every: int = 20
+    eval_every: int = 5
+    save_every: int = 5
 
     # Service configuration
     base_url: str | None = None
@@ -929,12 +1005,15 @@ async def cli_main(cli_config: CLIConfig):
         lora_rank=cli_config.lora_rank,
         learning_rate=cli_config.learning_rate,
         dataset_name=cli_config.dataset,
+        candidates_path=cli_config.candidates_path,
         num_fewshot_examples=cli_config.num_fewshot_examples,
         groups_per_batch=cli_config.groups_per_batch,
         group_size=cli_config.group_size,
         max_tokens=cli_config.max_tokens,
         kl_penalty_coef=cli_config.kl_penalty_coef,
         kl_discount_factor=cli_config.kl_discount_factor,
+        compute_post_kl=cli_config.compute_post_kl,
+        min_steps=cli_config.min_steps,
         num_substeps=cli_config.num_substeps,
         loss_fn=cli_config.loss_fn,  # type: ignore
         log_path=log_path,
