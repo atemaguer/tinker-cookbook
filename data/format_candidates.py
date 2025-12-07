@@ -1,6 +1,6 @@
 """
 Format synthetic candidate profiles into a simple JSONL messages format
-similar to prompt_distillation/create_data.py.
+for context distillation training.
 
 Reads: ../candidates.json
 Writes: data/candidates_formatted.jsonl
@@ -8,9 +8,18 @@ Writes: data/candidates_formatted.jsonl
 Each line:
 {
   "messages": [
-    {"role": "user", "content": "<plain-text candidate profile>"}
+    {"role": "user", "content": "<task instruction + candidate profile>"}
   ]
 }
+
+The user content includes:
+1. Task instruction header ("Write a LinkedIn outreach message...")
+2. Candidate profile data
+3. Task instruction footer ("Write a personalized, professional message...")
+
+This format matches the few-shot examples used in on_policy_context_distillation
+training, ensuring consistency between the teacher's few-shot context and the
+actual training prompts.
 
 We keep the original candidates.json untouched.
 """
@@ -29,8 +38,23 @@ DEFAULT_INPUTS = [
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "candidates_formatted.jsonl"
 
 
-def render_profile(c: dict) -> str:
-    parts = [
+TASK_INSTRUCTION_HEADER = "Write a LinkedIn outreach message for this candidate and role:"
+
+TASK_INSTRUCTION_FOOTER = (
+    "Write a personalized, professional message (under 150 words) that references "
+    "their specific background and explains why this role might interest them."
+)
+
+
+def render_profile(c: dict, include_instructions: bool = True) -> str:
+    """Render a candidate profile as plain text.
+    
+    Args:
+        c: Candidate dict from candidates.json
+        include_instructions: If True, wrap with task instructions to match 
+                              few-shot format used in training
+    """
+    profile_parts = [
         f"Name: {c.get('name')}",
         f"Target role: {c.get('title')} ({c.get('target_role_url')})",
         f"Location: {c.get('location')} | Timezone: {c.get('timezone')}",
@@ -40,11 +64,11 @@ def render_profile(c: dict) -> str:
 
     skills = ", ".join(c.get("skills_core", []))
     if skills:
-        parts.append(f"Skills: {skills}")
+        profile_parts.append(f"Skills: {skills}")
 
     projects = c.get("projects") or []
     if projects:
-        parts.append("Projects:\n- " + "\n- ".join(projects))
+        profile_parts.append("Projects:\n- " + "\n- ".join(projects))
 
     exp = c.get("recent_experience") or []
     if exp:
@@ -53,27 +77,40 @@ def render_profile(c: dict) -> str:
             highlights = role.get("highlights") or []
             hl = "; ".join(highlights)
             bullets.append(f"{role.get('title')} @ {role.get('company')} ({role.get('tenure')}): {hl}")
-        parts.append("Experience:\n- " + "\n- ".join(bullets))
+        profile_parts.append("Experience:\n- " + "\n- ".join(bullets))
 
     edu = c.get("education")
     if edu:
-        parts.append(f"Education: {edu}")
+        profile_parts.append(f"Education: {edu}")
 
     open_note = c.get("openness")
     if open_note:
-        parts.append(f"Openness: {open_note}")
+        profile_parts.append(f"Openness: {open_note}")
 
     jd_excerpt = c.get("job_description_excerpt") or ""
     if jd_excerpt:
-        parts.append("Job excerpt:\n" + jd_excerpt.strip())
+        profile_parts.append("Job excerpt:\n" + jd_excerpt.strip())
 
-    return "\n".join(parts)
+    profile_text = "\n".join(profile_parts)
+    
+    if include_instructions:
+        # Match the few-shot format from on_policy_context_distillation
+        return f"{TASK_INSTRUCTION_HEADER}\n\n{profile_text}\n\n{TASK_INSTRUCTION_FOOTER}"
+    else:
+        return profile_text
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Format candidate profiles for context distillation training."
+    )
     parser.add_argument("--input", type=Path, help="Path to candidates.json")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output JSONL path")
+    parser.add_argument(
+        "--no-instructions",
+        action="store_true",
+        help="Omit task instructions (profile data only). Default includes instructions."
+    )
     args = parser.parse_args()
 
     input_path = args.input
@@ -82,17 +119,20 @@ def main() -> None:
     if not input_path or not input_path.exists():
         raise SystemExit(f"candidates.json not found. Looked in: {DEFAULT_INPUTS}")
 
+    include_instructions = not args.no_instructions
+
     with input_path.open("r", encoding="utf-8") as fh:
         candidates = json.load(fh)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as out:
         for c in candidates:
-            profile_text = render_profile(c)
+            profile_text = render_profile(c, include_instructions=include_instructions)
             record = {"messages": [{"role": "user", "content": profile_text}]}
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(candidates)} records to {args.output}")
+    mode = "with task instructions" if include_instructions else "profile data only"
+    print(f"Wrote {len(candidates)} records ({mode}) to {args.output}")
 
 
 if __name__ == "__main__":

@@ -1,19 +1,20 @@
 """
-Outbound-message evaluator aligned with Tinker SamplingClientEvaluator.
+Outbound-message evaluator aligned with on_policy_context_distillation training.
+
+This evaluator is designed to match the training format exactly:
+- Student sees: [{"role": "user", "content": "<task instructions + candidate profile + job info>"}]
+- NO system message (matches training where student has no system instructions)
+- Task instructions are baked into the data (from candidates_formatted.jsonl)
 
 Flow:
-- Dataset is loaded from candidates_formatted.jsonl (JSONL with messages format).
-- Each record contains a candidate profile and job description in the user message.
-- Sampling model generates a LinkedIn-style DM.
-- A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json.
-- Grader is calibrated to be VERY HARSH — most messages score 8-16.
+1. Load dataset from candidates_formatted.jsonl (self-contained prompts with instructions)
+2. Sampling model generates a LinkedIn-style DM
+3. A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json
 
 The rubric and candidate data are designed to be challenging:
 - ~55% of candidates are "edge cases" with subtle mismatches, red flags, or sparse profiles
-- Edge cases include: domain mismatches, outdated experience, job hoppers, sparse profiles
 - Rubric heavily penalizes surface-level personalization and template patterns
 - High scores (20+) require genuine insight, not just restating profile details
-- Even "perfect fit" candidates require nuanced messaging to score well
 
 Expected score distribution:
 - 0-5: Poor/template messages
@@ -22,13 +23,13 @@ Expected score distribution:
 - 20-27: Strong, uncommon
 - 28-35: Exceptional, extremely rare
 
-Usage (example):
-  python -m tinker_cookbook.eval.outreach_evaluator \
-    --dataset data/candidates_formatted.jsonl \
-    --rubric data/rubric.json \
-    --limit 10 \
-    --creator-model Qwen/Qwen3-4B-Instruct-2507 \
-    --renderer qwen3 \
+Usage:
+  python -m tinker_cookbook.eval.outreach_evaluator \\
+    --dataset data/candidates_formatted.jsonl \\
+    --rubric data/rubric.json \\
+    --limit 10 \\
+    --creator-model Qwen/Qwen3-4B-Instruct-2507 \\
+    --renderer qwen3 \\
     --verbose
 
 Env:
@@ -39,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -73,8 +73,8 @@ class Penalty(BaseModel):
 class GradedSections(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    section_scores: List[SectionScore]  # List instead of Dict for OpenAI structured outputs
-    penalties: List[Penalty]  # Required for OpenAI structured outputs; empty list if no penalties
+    section_scores: List[SectionScore]
+    penalties: List[Penalty]  # Empty list if no penalties
 
 
 def load_json(path: Path) -> Any:
@@ -82,45 +82,29 @@ def load_json(path: Path) -> Any:
         return json.load(fh)
 
 
-def load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    """Load a JSONL file (one JSON object per line)."""
-    items = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                items.append(json.loads(line))
-    return items
-
-
-def build_dataset_from_jsonl(data: List[Dict[str, Any]], limit: int | None = None) -> List[Dict[str, Any]]:
-    """
-    Build dataset from candidates_formatted.jsonl format.
+def build_dataset_from_formatted_jsonl(jsonl_path: Path, limit: int | None = None) -> List[Dict[str, Any]]:
+    """Load dataset from candidates_formatted.jsonl - matches training format exactly.
     
-    Each item in data should have:
-      {"messages": [{"role": "user", "content": "...candidate profile + job description..."}]}
+    The JSONL format has {"messages": [{"role": "user", "content": "..."}]} per line.
+    Each data point is self-contained with task instructions, candidate profile, and job description.
     
-    We extract the user content and wrap it with the recruiter instruction prompt.
+    IMPORTANT: We pass through the content as-is, since instructions are already baked in.
+    Do NOT wrap with additional instructions - that would create a mismatch with training.
     """
     items: List[Dict[str, Any]] = []
-    for idx, record in enumerate(data):
-        if limit and idx >= limit:
-            break
-        
-        # Extract the candidate profile + job description from the messages
-        messages = record.get("messages", [])
-        if not messages:
-            continue
-        
-        # The user message contains the candidate profile and job description
-        user_content = messages[0].get("content", "") if messages else ""
-        
-        prompt = (
-            "You are a recruiter crafting a concise, respectful LinkedIn DM to a candidate about a role.\n"
-            "Use the candidate profile and the job description below. Keep it <130 words, clear CTA, no fluff.\n\n"
-            f"{user_content}\n"
-        )
-        items.append({"prompt": prompt})
+    with jsonl_path.open("r", encoding="utf-8") as fh:
+        for idx, line in enumerate(fh):
+            if limit is not None and idx >= limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            messages = row.get("messages", [])
+            # Extract user message content (already has instructions baked in)
+            user_msg = next((m for m in messages if m.get("role") == "user"), None)
+            if user_msg:
+                items.append({"prompt": user_msg["content"]})
     return items
 
 
@@ -152,7 +136,6 @@ def _print_result(
     # Draft message
     print(f"\n{_BOLD}📝 Draft Message:{_RESET}")
     print(f"{_DIM}{'─' * 40}{_RESET}")
-    # Indent and wrap the message for readability
     for line in dm.split("\n"):
         print(f"  {line}")
     print(f"{_DIM}{'─' * 40}{_RESET}")
@@ -161,7 +144,6 @@ def _print_result(
     if section_scores:
         print(f"\n{_BOLD}📊 Section Scores:{_RESET}")
         for sec in section_scores:
-            # Color based on score (assuming max ~10 per section)
             if sec.score >= 8:
                 color = _GREEN
             elif sec.score >= 5:
@@ -193,6 +175,16 @@ def _print_result(
 
 
 class OutboundEvaluator(SamplingClientEvaluator):
+    """Evaluator for outreach message generation.
+    
+    IMPORTANT: To match on_policy_context_distillation training:
+    - Use dataset from build_dataset_from_formatted_jsonl() (instructions already baked in)
+    - Use convo_prefix=[] (empty, NO system message)
+    
+    The student model during training sees the user message with task instructions,
+    candidate info, and job description all baked in. NO additional wrapping needed.
+    """
+    
     def __init__(
         self,
         dataset: List[Dict[str, Any]],
@@ -204,6 +196,7 @@ class OutboundEvaluator(SamplingClientEvaluator):
         max_tokens: int = 200,
         temperature: float = 0.7,
         verbose: bool = False,
+        convo_prefix: List[renderers.Message] | None = None,
     ):
         self.dataset = dataset
         self.rubric = rubric
@@ -211,6 +204,8 @@ class OutboundEvaluator(SamplingClientEvaluator):
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.verbose = verbose
+        # Default to empty convo_prefix to match training (student has no system message)
+        self.convo_prefix = convo_prefix if convo_prefix is not None else []
 
         tokenizer = get_tokenizer(model_name)
         self.renderer = renderers.get_renderer(name=renderer_name, tokenizer=tokenizer)
@@ -226,10 +221,11 @@ class OutboundEvaluator(SamplingClientEvaluator):
 
         scores: List[float] = []
         for idx, datum in enumerate(self.dataset, start=1):
-            model_input: types.ModelInput = self.renderer.build_generation_prompt(
-                [renderers.Message(role="user", content=datum["prompt"])]
-            )
-            # Progress logging to help debug long waits.
+            # Match training's convo construction: convo_prefix + [user message]
+            # The prompt already has instructions baked in from candidates_formatted.jsonl
+            convo = self.convo_prefix + [renderers.Message(role="user", content=datum["prompt"])]
+            model_input: types.ModelInput = self.renderer.build_generation_prompt(convo)
+            
             print(f"[creator] sampling example {idx}/{len(self.dataset)} ...", flush=True)
             resp: types.SampleResponse = await sampling_client.sample_async(
                 prompt=model_input, num_samples=1, sampling_params=sampling_params
@@ -247,7 +243,7 @@ class OutboundEvaluator(SamplingClientEvaluator):
                 scores.append(score)
                 continue
 
-            print(f"\033[90m[grader] scoring example {idx}/{len(self.dataset)} ...\033[0m", flush=True)
+            print(f"{_DIM}[grader] scoring example {idx}/{len(self.dataset)} ...{_RESET}", flush=True)
             score, justification, section_scores, penalties = self.grade(dm_clean, datum["prompt"])
             if self.verbose:
                 _print_result(idx, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
@@ -257,7 +253,6 @@ class OutboundEvaluator(SamplingClientEvaluator):
         return {"outreach_score": avg}
 
     def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
-        # Include grader instructions from rubric if available
         grader_instructions = self.rubric.get("grader_instructions", "")
         
         system_prompt = (
@@ -285,7 +280,6 @@ class OutboundEvaluator(SamplingClientEvaluator):
             messages=messages,  # type: ignore[arg-type]
             response_format=GradedSections,
         )
-        # beta.chat.completions.parse returns parsed content under choices[].message.parsed
         parsed_content = resp.choices[0].message.parsed
         content = parsed_content.model_dump_json() if parsed_content is not None else (resp.choices[0].message.content or "")
         try:
@@ -293,21 +287,13 @@ class OutboundEvaluator(SamplingClientEvaluator):
             section_scores = graded.section_scores
             penalties = graded.penalties
 
-            total_sections = 0.0
-            comments: list[str] = []
-            for section in section_scores:
-                total_sections += float(section.score)
-                if section.comments:
-                    comments.append(f"{section.section_id}: {section.comments}")
-
-            total_penalties = 0.0
-            penalty_notes: list[str] = []
-            for pen in penalties:
-                total_penalties += float(pen.score)
-                if pen.reason:
-                    penalty_notes.append(pen.reason)
-
+            total_sections = sum(float(s.score) for s in section_scores)
+            total_penalties = sum(float(p.score) for p in penalties)
             total_score = total_sections + total_penalties
+
+            comments = [f"{s.section_id}: {s.comments}" for s in section_scores if s.comments]
+            penalty_notes = [p.reason for p in penalties if p.reason]
+            
             justification_parts = []
             if comments:
                 justification_parts.append("; ".join(comments))
@@ -317,17 +303,18 @@ class OutboundEvaluator(SamplingClientEvaluator):
 
             return total_score, justification, section_scores, penalties
         except Exception:
-            # If parsing fails, treat as zero.
             return 0.0, "Grader response parsing failed.", [], []
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Evaluate outreach message generation using candidates_formatted.jsonl"
+    )
     parser.add_argument(
         "--dataset", 
         type=Path, 
         default=Path("data/candidates_formatted.jsonl"),
-        help="Path to candidates_formatted.jsonl (JSONL with messages format)"
+        help="Path to candidates_formatted.jsonl (JSONL with self-contained prompts)"
     )
     parser.add_argument("--rubric", type=Path, default=Path("data/rubric.json"))
     parser.add_argument("--limit", type=int, default=None, help="Max examples to evaluate (default: all)")
@@ -338,12 +325,14 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=200)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--dry-run", action="store_true", help="Skip grader call; only generate drafts.")
-    parser.add_argument("--verbose", action="store_true", help="Print draft and grader JSON for each example.")
+    parser.add_argument("--verbose", action="store_true", help="Print draft and grader details for each example.")
     args = parser.parse_args()
 
-    data = load_jsonl(args.dataset)
+    # Load dataset - prompts are self-contained (instructions + profile + job already baked in)
+    dataset = build_dataset_from_formatted_jsonl(args.dataset, limit=args.limit)
+    print(f"[INFO] Loaded {len(dataset)} examples from {args.dataset}")
+    
     rubric = load_json(args.rubric)
-    dataset = build_dataset_from_jsonl(data, limit=args.limit)
 
     service_client = tinker.ServiceClient()
     sampling_client = service_client.create_sampling_client(base_model=args.creator_model)
@@ -358,11 +347,11 @@ def main():
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         verbose=args.verbose,
+        # No convo_prefix - matches training where student has no system message
     )
 
     async def run_eval():
         if args.dry_run:
-            # Just run creator, skip grader to debug latency.
             sampling_params = types.SamplingParams(
                 max_tokens=args.max_tokens,
                 temperature=args.temperature,
@@ -371,9 +360,8 @@ def main():
             )
             for idx, datum in enumerate(dataset, start=1):
                 print(f"[creator] sampling example {idx}/{len(dataset)} ...", flush=True)
-                model_input: types.ModelInput = evaluator.renderer.build_generation_prompt(
-                    [renderers.Message(role="user", content=datum["prompt"])]
-                )
+                convo = evaluator.convo_prefix + [renderers.Message(role="user", content=datum["prompt"])]
+                model_input: types.ModelInput = evaluator.renderer.build_generation_prompt(convo)
                 resp: types.SampleResponse = await sampling_client.sample_async(
                     prompt=model_input, num_samples=1, sampling_params=sampling_params
                 )
@@ -383,13 +371,11 @@ def main():
             return
 
         metrics = await evaluator(sampling_client)
-        print(metrics)
+        print(f"\n{_BOLD}Final metrics:{_RESET} {metrics}")
 
     import asyncio
-
     asyncio.run(run_eval())
 
 
 if __name__ == "__main__":
     main()
-
