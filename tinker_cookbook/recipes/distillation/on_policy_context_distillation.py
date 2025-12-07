@@ -15,7 +15,7 @@ Key concepts:
 - Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # Recruiting outreach with context distillation (uses default candidates.json)
+    # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
@@ -23,16 +23,6 @@ Example usage:
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
         lora_rank=128 \\
-        wandb_project=cookbook_context_distillation
-
-    # With roles.json for richer job descriptions
-    python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
-        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
-        dataset=recruiting \\
-        roles_path=data/roles.json \\
-        learning_rate=1e-4 \\
-        groups_per_batch=16 \\
         wandb_project=cookbook_context_distillation
 
     # With Llama model
@@ -255,220 +245,29 @@ class ContextDistillationDataset(RLDataset):
 
 
 # ============================================================================
-# Data loading utilities (pattern from outreach_evaluator.py)
+# Data loading
 # ============================================================================
-
-
-def load_json(path: Path) -> Any:
-    """Load a JSON file."""
-    with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file (one JSON object per line)."""
-    items = []
-    with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                items.append(json.loads(line))
-    return items
-
-
-# Instruction to append to prompts that only contain candidate profile data
-LINKEDIN_DM_INSTRUCTION = """You are a recruiter at xAI reaching out to a potential candidate about a job opening.
-
-Write a personalized LinkedIn DM (under 150 words) FROM YOU (the recruiter) TO THE CANDIDATE that:
-- References THEIR specific background and why it caught your attention
-- Explains why this role at xAI might be a great fit for THEM
-- Has a clear call-to-action (e.g., "Would you be open to a quick chat?")
-- Sounds warm and human, not templated
-
-Here is the candidate profile and role:
-"""
-
-
-def build_dataset_from_formatted_jsonl(
-    data: list[dict[str, Any]],
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    """Build dataset from pre-formatted JSONL with messages array.
-    
-    Expected format: {"messages": [{"role": "user", "content": "..."}]}
-    
-    Each data point should be self-contained with task instructions, candidate profile,
-    and job description already baked in (from format_candidates.py).
-    
-    IMPORTANT: We pass through the content as-is to match the evaluator.
-    Do NOT add additional instructions - that would create a mismatch.
-    """
-    items: list[dict[str, Any]] = []
-    for idx, record in enumerate(data):
-        if limit and idx >= limit:
-            break
-        
-        messages = record.get("messages", [])
-        if not messages:
-            logger.warning(f"Skipping record {idx}: no messages found")
-            continue
-        
-        # Get the user message content (already has instructions baked in)
-        user_message = next(
-            (m for m in messages if m.get("role") == "user"),
-            None
-        )
-        if user_message is None:
-            logger.warning(f"Skipping record {idx}: no user message found")
-            continue
-        
-        prompt = user_message.get("content", "")
-        if not prompt:
-            logger.warning(f"Skipping record {idx}: empty content")
-            continue
-        
-        # Extract metadata from prompt content
-        name = "Unknown"
-        role = "Unknown"
-        for line in prompt.split("\n"):
-            if line.startswith("Name:"):
-                name = line.split(":", 1)[1].strip()
-            elif line.startswith("Target role:"):
-                role_part = line.split(":", 1)[1].strip()
-                if "(" in role_part:
-                    role = role_part.split("(")[0].strip()
-                else:
-                    role = role_part
-        
-        items.append({
-            "question": prompt,
-            "candidate_id": f"candidate_{idx}",
-            "candidate_name": name,
-            "target_role": role,
-        })
-    
-    return items
-
-
-def format_candidate_profile(cand: dict[str, Any]) -> str:
-    """Format a candidate dict into a readable profile string."""
-    # Basic info
-    name = cand.get("name", "Unknown")
-    title = cand.get("title", "Unknown Role")
-    location = cand.get("location", "Unknown")
-    
-    # Skills
-    skills = cand.get("skills_core", [])
-    skills_str = ", ".join(skills[:6]) if skills else "Not specified"
-    
-    # Experience - format recent roles
-    experience = cand.get("recent_experience", [])
-    exp_lines = []
-    for exp in experience[:2]:
-        company = exp.get("company", "")
-        exp_title = exp.get("title", "")
-        tenure = exp.get("tenure", "")
-        highlights = exp.get("highlights", [])
-        if company and exp_title:
-            exp_lines.append(f"- {exp_title} @ {company} ({tenure})")
-            for h in highlights[:2]:
-                exp_lines.append(f"  • {h}")
-    experience_str = "\n".join(exp_lines) if exp_lines else "Not specified"
-    
-    # Projects
-    projects = cand.get("projects", [])
-    projects_str = "\n".join(f"- {p}" for p in projects[:3]) if projects else "Not specified"
-    
-    profile = f"""Name: {name}
-Target role: {title} ({cand.get("target_role_url", "")})
-Location: {location} | Timezone: {cand.get("timezone", "Flexible")}
-Seniority: {cand.get("seniority", "mid")} | Domain: {cand.get("domain", "unknown")}
-Summary: {cand.get("summary", "")}
-Skills: {skills_str}
-Projects:
-{projects_str}
-Experience:
-{experience_str}
-Education: {cand.get("education", "Not specified")}
-Openness: {cand.get("openness", "Not specified")}"""
-    
-    return profile
-
-
-def build_dataset_from_candidates_json(
-    candidates: list[dict[str, Any]],
-    roles: list[dict[str, Any]] | None = None,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    """Build dataset from raw candidates JSON, optionally matching with roles.
-    
-    Formats candidate data into readable prompts matching the few-shot example format.
-    """
-    items: list[dict[str, Any]] = []
-    for idx, cand in enumerate(candidates):
-        if limit and idx >= limit:
-            break
-        
-        # Match role by URL if roles provided
-        role_text = ""
-        if roles:
-            role = next(
-                (r for r in roles if r.get("absolute_url") == cand.get("target_role_url")),
-                None
-            )
-            if role:
-                role_text = role.get("content_text") or role.get("content_html") or ""
-        
-        # Fall back to job description excerpt from candidate
-        if not role_text:
-            role_text = cand.get("job_description_excerpt") or ""
-        
-        # Format candidate profile
-        profile = format_candidate_profile(cand)
-        
-        # Build prompt with job excerpt
-        prompt = f"""You are a recruiter at xAI reaching out to a potential candidate about a job opening.
-
-Write a personalized LinkedIn DM (under 150 words) FROM YOU (the recruiter) TO THE CANDIDATE that:
-- References THEIR specific background and why it caught your attention
-- Explains why this role at xAI might be a great fit for THEM
-- Has a clear call-to-action (e.g., "Would you be open to a quick chat?")
-- Sounds warm and human, not templated
-
-Here is the candidate profile and role:
-
-{profile}
-Job excerpt:
-{role_text[:1000] if role_text else "Not available"}"""
-        
-        items.append({
-            "question": prompt,
-            "candidate_id": cand.get("id", f"candidate_{idx}"),
-            "candidate_name": cand.get("name", "Unknown"),
-            "target_role": cand.get("title", "Unknown"),
-        })
-    
-    return items
 
 
 def load_recruiting_problems(
     candidates_path: str | Path | None = None,
-    roles_path: str | Path | None = None,
     split: Literal["train", "test"] = "train",
     limit: int | None = None,
 ) -> list[dict[str, Any]] | None:
     """Load recruiting candidate profiles as problem dicts.
 
+    Loads from a JSONL file where each line is:
+        {"messages": [{"role": "user", "content": "...prompt..."}]}
+    
+    Returns list of dicts with 'question' key for the training loop.
+
     Args:
-        candidates_path: Path to candidates file. If None, uses default path.
-            Supports both JSONL (pre-formatted with messages array) and 
-            JSON (raw candidate objects) formats.
-        roles_path: Optional path to roles.json for matching with candidates.
-        split: 'train' uses 80% of data, 'test' uses remaining 20%.
-        limit: Optional limit on number of candidates to load.
+        candidates_path: Path to JSONL file. Defaults to candidates_formatted.jsonl.
+        split: 'train' uses first 80%, 'test' uses last 20%.
+        limit: Optional limit on number of problems.
 
     Returns:
-        List of problem dicts with 'question' key containing the formatted prompt.
+        List of {"question": prompt} dicts, or None on error.
     """
     if candidates_path is None:
         candidates_path = DEFAULT_CANDIDATES_PATH
@@ -480,42 +279,39 @@ def load_recruiting_problems(
         return None
 
     try:
-        # Detect format based on file extension
-        is_jsonl = str(candidates_path).endswith(".jsonl")
-        
-        if is_jsonl:
-            # Load JSONL format (candidates_formatted.jsonl)
-            data = load_jsonl(candidates_path)
-        else:
-            # Load JSON format (candidates.json)
-            data = load_json(candidates_path)
+        # Load JSONL
+        records = []
+        with candidates_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
 
-        if not isinstance(data, list):
-            logger.warning(f"Expected list of candidates, got {type(data)}")
-            return None
-
-        # Split into train/test (80/20) - deterministic split, no shuffle here
-        # Shuffling for training variety happens in main() after loading
-        split_idx = int(len(data) * 0.8)
+        # Split into train/test (80/20) - deterministic split based on file order
+        # Train: first 80% (indices 0 to split_idx-1)
+        # Test: last 20% (indices split_idx to end)
+        total_count = len(records)
+        split_idx = int(total_count * 0.8)
         if split == "train":
-            data = data[:split_idx]
+            records = records[:split_idx]
         else:
-            data = data[split_idx:]
+            records = records[split_idx:]
 
-        # Build dataset based on format
-        if is_jsonl:
-            problems = build_dataset_from_formatted_jsonl(data, limit=limit)
-        else:
-            # Optionally load roles for matching
-            roles = None
-            if roles_path:
-                roles_path = Path(roles_path)
-                if roles_path.exists():
-                    roles = load_json(roles_path)
-            
-            problems = build_dataset_from_candidates_json(data, roles=roles, limit=limit)
+        # Extract prompts from messages format
+        problems = []
+        for record in records:
+            if limit and len(problems) >= limit:
+                break
+            messages = record.get("messages", [])
+            user_msg = next((m for m in messages if m.get("role") == "user"), None)
+            if user_msg and user_msg.get("content"):
+                problems.append({"question": user_msg["content"]})
 
-        logger.info(f"Loaded {len(problems)} recruiting problems from {candidates_path}")
+        logger.info(
+            f"Loaded {len(problems)} recruiting problems ({split} split: "
+            f"{'indices 0-' + str(split_idx-1) if split == 'train' else 'indices ' + str(split_idx) + '-' + str(total_count-1)}) "
+            f"from {candidates_path}"
+        )
         return problems
 
     except Exception as e:
@@ -538,6 +334,7 @@ PROBLEM_LOADER_MAP = {
 @scope
 async def incorporate_kl_penalty(
     data_D: List[tinker.Datum],
+    envs_D: List[ContextDistillationEnv],
     teacher_client: tinker.SamplingClient,
     kl_penalty_coef: float,
     kl_discount_factor: float,
@@ -545,38 +342,55 @@ async def incorporate_kl_penalty(
     """
     Compute reverse KL between the student (log p) and the teacher model (log q).
     
-    This follows the pattern from train_on_policy.py:
-    - Compute teacher logprobs on the same sequence the student generated
-    - KL = student_logprobs - teacher_logprobs
-    - Adjust advantages in-place as the negative reverse KL
+    For context distillation, the teacher sees few-shot examples while the student does not.
+    We compute:
+    - Teacher logprobs on: [few-shot context] + [problem] + [student's response]
+    - Student logprobs on: [problem] + [student's response]
+    
+    KL = student_logprobs - teacher_logprobs (reverse KL)
+    Advantages are adjusted by negative reverse KL to push student toward teacher.
     """
-    # Build full sequences by appending the last target token
-    full_sequence_inputs_D = [
-        datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
-        for datum in data_D
-    ]
+    # Build teacher sequences: teacher prompt (with few-shot) + student's generated response
+    # The student's response tokens are in the datum's target_tokens
+    teacher_sequence_inputs_D = []
+    for datum, env in safezip(data_D, envs_D):
+        # Get teacher prompt (includes few-shot examples)
+        teacher_prompt = env.get_teacher_prompt()
+        # Append all the response tokens the student generated
+        target_tokens = datum.loss_fn_inputs["target_tokens"].data
+        teacher_sequence = teacher_prompt
+        for token in target_tokens:
+            teacher_sequence = teacher_sequence.append_int(int(token))
+        teacher_sequence_inputs_D.append(teacher_sequence)
     
     # Compute the teacher's logprobs for each element of the batch
     teacher_logprobs_D = await asyncio.gather(
         *[
             teacher_client.compute_logprobs_async(sequence_input)
-            for sequence_input in full_sequence_inputs_D
+            for sequence_input in teacher_sequence_inputs_D
         ]
     )
     
     # The reverse KL is computed as KL[p||q] = log p - log q, where
     #   - p: sampled_logprobs (student)
-    #   - q: teacher_logprobs
+    #   - q: teacher_logprobs (on response tokens only)
     sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
     float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
     
-    # Note: teacher_logprobs[1:] because logprobs are offset by 1
-    reverse_kl = [
-        (sampled_logprobs - torch.tensor(teacher_logprobs[1:])) * mask
-        for teacher_logprobs, sampled_logprobs, mask in safezip(
-            teacher_logprobs_D, sampled_logprobs_D, float_masks
-        )
-    ]
+    # Extract teacher logprobs for response tokens only
+    # Teacher sequence = [teacher_prompt] + [response_tokens]
+    # Logprobs are offset by 1, so logprobs[i] is for token[i] given tokens[0:i]
+    # We want the logprobs for the response tokens, which are at the end
+    reverse_kl = []
+    for datum, teacher_logprobs, sampled_logprobs, mask in safezip(
+        data_D, teacher_logprobs_D, sampled_logprobs_D, float_masks
+    ):
+        num_response_tokens = len(sampled_logprobs)
+        # Teacher logprobs for response: last num_response_tokens entries
+        # Note: logprobs are offset by 1, so we take from index -num_response_tokens to end
+        teacher_response_logprobs = torch.tensor(teacher_logprobs[-num_response_tokens:])
+        kl = (sampled_logprobs - teacher_response_logprobs) * mask
+        reverse_kl.append(kl)
     
     total_kl = 0.0
     total_tokens = 0.0
@@ -620,7 +434,6 @@ class Config:
 
     dataset_name: str = "recruiting"
     candidates_path: str | None = None
-    roles_path: str | None = None
     num_fewshot_examples: int | None = None
     groups_per_batch: int = 16
     group_size: int = 4
@@ -675,11 +488,14 @@ async def prepare_minibatch_with_context(
     if data_D:
         logger.info(colorize_example(data_D[0], tokenizer, key="mask"))
 
-    # Incorporate KL penalty (using the simpler approach from train_on_policy.py)
+    # Incorporate KL penalty using context-aware teacher prompts
+    # Flatten envs to match datum order (same flattening as assemble_training_data)
     if kl_penalty_coef > 0:
+        envs_D = [env for envs_G in envs_P_G for env in envs_G]
         with timed("compute_kl_penalty", metrics):
             kl_metrics = await incorporate_kl_penalty(
                 data_D,
+                envs_D,
                 teacher_client,
                 kl_penalty_coef,
                 kl_discount_factor,
@@ -798,7 +614,6 @@ async def main(cfg: Config):
     if cfg.dataset_name == "recruiting":
         train_problems = load_recruiting_problems(
             candidates_path=cfg.candidates_path,
-            roles_path=cfg.roles_path,
             split="train",
         )
     else:
@@ -847,7 +662,6 @@ async def main(cfg: Config):
             # Load test split using same function as training (ensures consistent split)
             test_problems = load_recruiting_problems(
                 candidates_path=cfg.candidates_path,
-                roles_path=cfg.roles_path,
                 split="test",
             )
             
@@ -1017,7 +831,6 @@ class CLIConfig:
     # Dataset configuration
     dataset: str = "recruiting"
     candidates_path: str | None = None
-    roles_path: str | None = None
     num_fewshot_examples: int | None = None
 
     # Training hyperparameters
@@ -1082,7 +895,6 @@ async def cli_main(cli_config: CLIConfig):
         learning_rate=cli_config.learning_rate,
         dataset_name=cli_config.dataset,
         candidates_path=cli_config.candidates_path,
-        roles_path=cli_config.roles_path,
         num_fewshot_examples=cli_config.num_fewshot_examples,
         groups_per_batch=cli_config.groups_per_batch,
         group_size=cli_config.group_size,
