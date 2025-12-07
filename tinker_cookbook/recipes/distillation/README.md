@@ -1,6 +1,6 @@
 # Distillation
 
-Distillation refers to a class of methods where a teacher model is supervising the training of a student model, which can often be more efficient than training the student model in isolation. We provide off-policy and on-policy distillation recipes on top of the [OpenThoughts3](https://huggingface.co/datasets/open-thoughts/OpenThoughts3-1.2M), [DeepMath](https://huggingface.co/datasets/zwhe99/DeepMath-103K), and [Tulu3](https://huggingface.co/datasets/allenai/tulu-3-sft-mixture)* datasets.
+Distillation refers to a class of methods where a teacher model is supervising the training of a student model, which can often be more efficient than training the student model in isolation. We provide off-policy and on-policy distillation recipes on top of the [OpenThoughts3](https://huggingface.co/datasets/open-thoughts/OpenThoughts3-1.2M), [DeepMath](https://huggingface.co/datasets/zwhe99/DeepMath-103K), and [Tulu3](https://huggingface.co/datasets/allenai/tulu-3-sft-mixture)\* datasets.
 
 Specifically, we provide the scripts needed to reproduce our experiments from the [On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation) blog post, which can be run with LoRA using Tinker.
 
@@ -9,6 +9,7 @@ Specifically, we provide the scripts needed to reproduce our experiments from th
 ## Distillation for reasoning
 
 Our results can be reproduced by running:
+
 1. Supervised finetuning on [OpenThoughts3](https://huggingface.co/datasets/open-thoughts/OpenThoughts3-1.2M)
 2. On-policy distillation on [DeepMath](https://huggingface.co/datasets/zwhe99/DeepMath-103K)
 
@@ -44,6 +45,7 @@ This script can also be used to replicate the experiments in our Discussion sect
 ## Distillation for personalization
 
 In this section, we ran:
+
 1. Supervised finetuning on internal documents + resampled Tulu3 data
 2. On-policy distillation on [Tulu3](https://huggingface.co/datasets/allenai/tulu-3-sft-mixture) prompts
 
@@ -60,6 +62,106 @@ python -m tinker_cookbook.recipes.distillation.on_policy_distillation \
     lora_rank=128 \
     wandb_project=cookbook_distillation
 ```
+
+## On-policy context distillation
+
+On-policy context distillation combines prompt/context distillation with on-policy learning. The key idea is **asymmetric context**:
+
+- **Student**: Receives only the problem prompt (NO few-shot examples)
+- **Teacher**: Receives few-shot examples + problem to provide KL supervision
+
+The student learns to solve problems as if it had access to few-shot examples, by matching the teacher's distribution. Over training, the student internalizes the reasoning patterns from context it never actually sees.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Context Distillation                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Teacher sees:              Student sees:                   │
+│  ┌─────────────────┐        ┌─────────────────┐            │
+│  │ Few-shot Ex 1   │        │                 │            │
+│  │ Few-shot Ex 2   │        │                 │            │
+│  │ Few-shot Ex 3   │        │                 │            │
+│  │ ─────────────── │        │                 │            │
+│  │ Problem         │        │ Problem         │            │
+│  └─────────────────┘        └─────────────────┘            │
+│         │                          │                        │
+│         ▼                          ▼                        │
+│  Teacher logprobs           Student generates               │
+│  (with context)             (without context)               │
+│         │                          │                        │
+│         └──────────┬───────────────┘                        │
+│                    ▼                                        │
+│           KL(student || teacher)                            │
+│           Student learns to match teacher                   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Available datasets
+
+- **GSM8K**: Grade school math word problems with step-by-step arithmetic reasoning
+- **MATH (Hendrycks)**: Competition-level math problems requiring more sophisticated reasoning
+- **DeepMath**: Deep learning-curated math problems
+
+### Running context distillation
+
+```bash
+# GSM8K with context distillation
+python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \
+    model_name=Qwen/Qwen3-8B-Base \
+    dataset=gsm8k \
+    learning_rate=1e-4 \
+    groups_per_batch=256 \
+    lora_rank=128 \
+    wandb_project=cookbook_context_distillation
+
+# Hendrycks MATH with context distillation
+python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \
+    model_name=Qwen/Qwen3-8B-Base \
+    dataset=math \
+    learning_rate=1e-4 \
+    groups_per_batch=256 \
+    lora_rank=128 \
+    wandb_project=cookbook_context_distillation
+```
+
+### Customizing few-shot examples
+
+You can control the number of few-shot examples the **teacher** uses:
+
+```bash
+# Use only 2 few-shot examples for the teacher
+python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \
+    model_name=Qwen/Qwen3-8B-Base \
+    dataset=gsm8k \
+    num_fewshot_examples=2 \
+    learning_rate=1e-4 \
+    groups_per_batch=256 \
+    lora_rank=128
+```
+
+The default behavior (`num_fewshot_examples=None`) uses all available examples:
+
+- GSM8K: 3 few-shot examples demonstrating step-by-step arithmetic
+- MATH: 3 few-shot examples demonstrating mathematical reasoning with LaTeX
+
+### Key parameters
+
+| Parameter              | Description                                 | Default       |
+| ---------------------- | ------------------------------------------- | ------------- |
+| `dataset`              | Math dataset to use (gsm8k, math, deepmath) | gsm8k         |
+| `num_fewshot_examples` | Number of few-shot examples for teacher     | None (all)    |
+| `teacher_model`        | Teacher model for KL supervision            | Qwen/Qwen3-8B |
+| `kl_penalty_coef`      | Coefficient for KL penalty                  | 1.0           |
+| `max_tokens`           | Maximum tokens for generation               | 4096          |
+
+### How it works
+
+1. **Student samples**: Given only the problem, the student generates a response
+2. **Teacher evaluates**: The teacher sees few-shot examples + problem + student's response and computes logprobs
+3. **KL penalty**: The student is trained to minimize KL divergence from the teacher's distribution
+4. **Internalization**: Over training, the student learns the reasoning patterns demonstrated in the few-shot examples, even though it never sees them
 
 ## Additional details
 
