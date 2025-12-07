@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict
 
 
-DEFAULT_GRADER_MODEL = "gpt-4.1"
+DEFAULT_GRADER_MODEL = "gpt-5.1"
 
 
 class SectionScore(BaseModel):
@@ -237,23 +237,35 @@ class OutreachGrader:
         self,
         messages: List[str],
         prompt_contexts: List[str],
+        serial: bool = False,
     ) -> List[GradeResult]:
-        """Grade multiple messages in parallel.
+        """Grade multiple messages.
         
         Args:
             messages: List of outreach messages to grade
             prompt_contexts: List of corresponding prompts/contexts
+            serial: If True, grade one at a time (avoids rate limits). 
+                   If False, grade in parallel.
         
         Returns:
             List of GradeResult objects
         """
         import asyncio
         
-        tasks = [
-            self.grade_async(msg, ctx)
-            for msg, ctx in zip(messages, prompt_contexts)
-        ]
-        return await asyncio.gather(*tasks)
+        if serial:
+            # Grade one at a time to avoid rate limits
+            results = []
+            for msg, ctx in zip(messages, prompt_contexts):
+                result = await self.grade_async(msg, ctx)
+                results.append(result)
+            return results
+        else:
+            # Grade in parallel
+            tasks = [
+                self.grade_async(msg, ctx)
+                for msg, ctx in zip(messages, prompt_contexts)
+            ]
+            return await asyncio.gather(*tasks)
 
 
 def load_rubric(path: Path | str) -> Dict[str, Any]:

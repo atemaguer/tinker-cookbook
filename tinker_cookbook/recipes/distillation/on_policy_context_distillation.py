@@ -569,6 +569,7 @@ class Config:
     eval_every: int = 5
     eval_limit: int = 10  # Number of examples to evaluate (grading is slow)
     eval_temperature: float = 0.0  # Temperature for evaluation (0 = deterministic/greedy)
+    serial_grading: bool = False  # Grade one at a time to avoid rate limits
     rubric_path: str | None = None  # Path to rubric.json for grading
     save_every: int = 5
     load_checkpoint_path: str | None = None
@@ -674,6 +675,7 @@ async def generate_feedback_for_envs(
     envs_P_G: list[list[ContextDistillationEnv]],
     grader: OutreachGrader,
     renderer: renderers.Renderer,
+    serial_grading: bool = False,
 ) -> Dict[str, float]:
     """Generate feedback for all student completions and attach to environments.
     
@@ -683,6 +685,9 @@ async def generate_feedback_for_envs(
     3. Attaches the feedback to the corresponding environment
     
     The feedback will be used by get_teacher_prompt() when use_feedback=True.
+    
+    Args:
+        serial_grading: If True, grade one at a time to avoid rate limits.
     
     Returns metrics about the feedback generation (average scores, etc.)
     """
@@ -716,9 +721,10 @@ async def generate_feedback_for_envs(
     if not all_completions:
         return {"feedback/count": 0}
     
-    # Grade all completions in parallel
-    logger.info(f"[feedback] Generating feedback for {len(all_completions)} completions...")
-    feedback_results = await grader.grade_batch_async(all_completions, all_prompts)
+    # Grade completions
+    mode = "serially" if serial_grading else "in parallel"
+    logger.info(f"[feedback] Generating feedback for {len(all_completions)} completions {mode}...")
+    feedback_results = await grader.grade_batch_async(all_completions, all_prompts, serial=serial_grading)
     
     # Attach feedback to environments
     scores = []
@@ -880,6 +886,7 @@ async def main(cfg: Config):
                     max_tokens=cfg.max_tokens,
                     temperature=cfg.eval_temperature,  # Use eval temp (0 = deterministic)
                     verbose=False,  # Don't print individual results during training
+                    serial_grading=cfg.serial_grading,
                 )
                 logger.info(f"Created evaluator with {len(test_data)} examples from TEST split")
             else:
@@ -968,6 +975,7 @@ async def main(cfg: Config):
                     envs_P_G,
                     grader,
                     renderer,
+                    serial_grading=cfg.serial_grading,
                 )
             metrics.update(feedback_metrics)
 
@@ -1078,6 +1086,7 @@ class CLIConfig:
     eval_every: int = 5
     eval_limit: int = 10  # Number of examples to grade per eval (grading is slow)
     eval_temperature: float = 0.0  # Temperature for evaluation (0 = deterministic/greedy)
+    serial_grading: bool = False  # Grade one at a time to avoid rate limits
     rubric_path: str | None = None  # Path to rubric.json
     save_every: int = 5
 
@@ -1138,6 +1147,7 @@ async def cli_main(cli_config: CLIConfig):
         eval_every=cli_config.eval_every,
         eval_limit=cli_config.eval_limit,
         eval_temperature=cli_config.eval_temperature,
+        serial_grading=cli_config.serial_grading,
         rubric_path=cli_config.rubric_path,
         save_every=cli_config.save_every,
         load_checkpoint_path=cli_config.load_checkpoint_path,

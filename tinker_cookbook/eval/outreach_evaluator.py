@@ -179,12 +179,14 @@ class OutboundEvaluator(SamplingClientEvaluator):
         temperature: float = 0.7,
         verbose: bool = False,
         convo_prefix: List[renderers.Message] | None = None,
+        serial_grading: bool = False,
     ):
         self.dataset = dataset
         self.rubric = rubric
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.verbose = verbose
+        self.serial_grading = serial_grading
         # Default to empty convo_prefix to match training (student has no system message)
         self.convo_prefix = convo_prefix if convo_prefix is not None else []
 
@@ -242,12 +244,15 @@ class OutboundEvaluator(SamplingClientEvaluator):
             if self.verbose:
                 _print_result(idx + 1, len(self.dataset), dm_text, 0.0, "Empty or invalid draft; skipped grading.", [], [])
 
-        # Grade all valid drafts in parallel using the modular grader
+        # Grade all valid drafts using the modular grader
         if drafts:
-            print(f"{_DIM}[grader] scoring {len(drafts)} examples in parallel ...{_RESET}", flush=True)
+            mode = "serially" if self.serial_grading else "in parallel"
+            print(f"{_DIM}[grader] scoring {len(drafts)} examples {mode} ...{_RESET}", flush=True)
             messages_to_grade = [dm_clean for _, dm_clean, _ in drafts]
             prompts_for_grading = [prompt for _, _, prompt in drafts]
-            grade_results = await self.grader.grade_batch_async(messages_to_grade, prompts_for_grading)
+            grade_results = await self.grader.grade_batch_async(
+                messages_to_grade, prompts_for_grading, serial=self.serial_grading
+            )
             print(f"[grader] scoring complete.", flush=True)
 
             for (idx, dm_clean, _), result in zip(drafts, grade_results):
