@@ -97,120 +97,42 @@ from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
 
 logger = logging.getLogger(__name__)
 
-# Default path to candidates data (relative to this file's parent directory)
+# Default paths (relative to this file's parent directory)
 DEFAULT_CANDIDATES_PATH = Path(__file__).parent.parent.parent.parent / "data" / "candidates_formatted.jsonl"
+DEFAULT_FEWSHOT_PATH = Path(__file__).parent.parent.parent.parent / "data" / "fewshot_examples.jsonl"
 
 
 # ============================================================================
 # Few-shot examples for recruiting outreach context distillation
+# Loaded from data/fewshot_examples.jsonl to match candidates_formatted.jsonl format
 # ============================================================================
 
-RECRUITING_FEWSHOT_EXAMPLES: list[renderers.Message] = [
-    {
-        "role": "user",
-        "content": """Write a LinkedIn outreach message for this candidate and role:
+def load_fewshot_examples_from_jsonl(path: Path) -> list[renderers.Message]:
+    """Load few-shot examples from a JSONL file.
+    
+    Each line should be: {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+    Returns a flat list of messages suitable for use as few-shot context.
+    """
+    messages: list[renderers.Message] = []
+    if not path.exists():
+        logger.warning(f"Few-shot examples file not found: {path}")
+        return messages
+    
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            for msg in record.get("messages", []):
+                messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    logger.info(f"Loaded {len(messages) // 2} few-shot examples from {path}")
+    return messages
 
-**Candidate Profile:**
-- Name: Alex Chen
-- Current Title: Senior ML Engineer at Anthropic
-- Skills: PyTorch, Transformers, RLHF, Distributed Training
-- Experience: 4 years building LLM training infrastructure
-- Location: San Francisco, CA
 
-**Target Role:**
-- Title: Member of Technical Staff, Post-training
-- Company: xAI
-- Location: Palo Alto, CA
-- Key Requirements: Experience with RLHF, large-scale training, transformer architectures
-
-Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
-    },
-    {
-        "role": "assistant",
-        "content": """Hi Alex,
-
-I came across your work at Anthropic on LLM training infrastructure—the scale and complexity of that work is impressive.
-
-We're building the post-training team at xAI, focused on RLHF and alignment at scales that push the boundaries of what's possible. Given your hands-on experience with distributed training and transformers, I think you'd thrive in our environment.
-
-What makes xAI different: flat structure, direct ownership of critical systems, and a team obsessed with moving fast. The Palo Alto commute from SF is easy, and we're flexible on hybrid arrangements.
-
-Would you be open to a quick chat this week? I'd love to share more about what we're building.
-
-Best,
-[Recruiter]""",
-    },
-    {
-        "role": "user",
-        "content": """Write a LinkedIn outreach message for this candidate and role:
-
-**Candidate Profile:**
-- Name: Priya Sharma
-- Current Title: Staff SRE at Google Cloud
-- Skills: Kubernetes, Observability, Networking, High-availability systems
-- Experience: 6 years scaling cloud infrastructure, led team of 8
-- Location: Seattle, WA (open to relocation)
-
-**Target Role:**
-- Title: Site Reliability Engineer - Kubernetes Platform
-- Company: xAI
-- Location: Palo Alto, CA
-- Key Requirements: Deep Kubernetes expertise, experience with GPU clusters, platform reliability
-
-Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
-    },
-    {
-        "role": "assistant",
-        "content": """Hi Priya,
-
-Your work scaling Kubernetes at Google Cloud caught my attention—especially the observability and high-availability focus at that scale.
-
-At xAI, we're running one of the world's largest GPU clusters on Kubernetes, and we need someone who can architect reliability at that level. You'd own the platform that powers Grok's training and inference infrastructure.
-
-I noticed you're open to relocation—we offer comprehensive relo packages to Palo Alto, and the team culture here is very different from big tech: direct impact, minimal layers, engineering-driven decisions.
-
-Given your leadership experience with that 8-person team, I think you'd find the scope here exciting.
-
-Free for a 15-minute call this week to explore?
-
-Best,
-[Recruiter]""",
-    },
-    {
-        "role": "user",
-        "content": """Write a LinkedIn outreach message for this candidate and role:
-
-**Candidate Profile:**
-- Name: Marcus Johnson
-- Current Title: Backend Engineer at Stripe
-- Skills: Go, Rust, PostgreSQL, API Design, High-throughput systems
-- Experience: 3 years building payment infrastructure
-- Location: Remote (NYC-based)
-
-**Target Role:**
-- Title: Backend Engineer - Grok Chat
-- Company: xAI
-- Location: Palo Alto, CA; San Francisco, CA
-- Key Requirements: Scalable backend systems, real-time processing, API design
-
-Write a personalized, professional message (under 150 words) that references their specific background and explains why this role might interest them.""",
-    },
-    {
-        "role": "assistant",
-        "content": """Hi Marcus,
-
-Building payment infrastructure at Stripe means you know what "can't go down" really means—that same reliability mindset is exactly what we need on the Grok Chat backend.
-
-We're designing systems that serve millions of real-time AI conversations, with latency requirements that make the work genuinely challenging. Your Go/Rust experience and API design background would translate directly.
-
-The role is in SF/Palo Alto, but we're flexible on hybrid arrangements. Given you're currently remote in NYC, I'm happy to discuss what relocation support looks like if that's of interest.
-
-Stripe → AI infrastructure is a path several of our engineers have taken. Would you be up for a quick call to hear more about the technical challenges we're solving?
-
-Best,
-[Recruiter]""",
-    },
-]
+# Load few-shot examples at module load time
+RECRUITING_FEWSHOT_EXAMPLES: list[renderers.Message] = load_fewshot_examples_from_jsonl(DEFAULT_FEWSHOT_PATH)
 
 
 def get_fewshot_examples(
