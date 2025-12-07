@@ -1,18 +1,21 @@
 """
-On-policy context distillation for recruiting outreach messages.
+On-policy distillation with optional context (few-shot examples).
 
-This script combines prompt distillation and on-policy distillation:
-- Student: Receives only the candidate profile + job description (NO examples)
-- Teacher: Receives few-shot examples of good outreach messages + candidate/job info
+This script supports two modes:
+1. **Context distillation** (when few-shot examples are provided):
+   - Student: Receives only the problem/prompt (NO examples)
+   - Teacher: Receives few-shot examples + problem
+   - Goal: Student internalizes patterns from context it never sees
 
-The goal is to train the student to internalize high-quality outreach patterns,
-learning to write effective LinkedIn DMs as if it had seen examples, without actually having them.
+2. **Regular on-policy distillation** (when no few-shot examples are provided):
+   - Both student and teacher see the same prompt
+   - Goal: Student learns to match teacher's distribution directly
 
 Key concepts:
-- Context asymmetry: Teacher sees few-shot examples, student does not
-- On-policy sampling: Student generates messages without context
-- KL penalty: Student learns to match teacher's distribution (which has context)
-- Context internalization: Model learns to replicate good messaging patterns it never sees
+- Context asymmetry (optional): Teacher may see few-shot examples, student does not
+- On-policy sampling: Student generates responses
+- KL penalty: Student learns to match teacher's distribution
+- Context internalization: Model learns to replicate patterns from context (if provided)
 
 Example usage:
     # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
@@ -25,11 +28,22 @@ Example usage:
         lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # With Llama model
+    # Regular on-policy distillation (no few-shot context)
+    python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
+        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
+        dataset=recruiting \\
+        num_fewshot_examples=0 \\
+        learning_rate=1e-4 \\
+        groups_per_batch=16 \\
+        wandb_project=cookbook_distillation
+
+    # With Llama model and limited context
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=meta-llama/Llama-3.1-8B \\
         teacher_model=meta-llama/Llama-3.1-8B \\
         dataset=recruiting \\
+        num_fewshot_examples=3 \\
         learning_rate=1e-4 \\
         groups_per_batch=8 \\
         wandb_project=cookbook_context_distillation
@@ -89,8 +103,9 @@ DEFAULT_RUBRIC_PATH = Path(__file__).parent.parent.parent.parent / "data" / "rub
 
 
 # ============================================================================
-# Few-shot examples for recruiting outreach context distillation
+# Few-shot examples for context distillation (optional)
 # Loaded from data/fewshot_examples.jsonl to match candidates_formatted.jsonl format
+# When num_fewshot_examples=0, these are not used (regular distillation mode)
 # ============================================================================
 
 def load_fewshot_examples_from_jsonl(path: Path) -> list[renderers.Message]:
@@ -124,7 +139,22 @@ RECRUITING_FEWSHOT_EXAMPLES: list[renderers.Message] = load_fewshot_examples_fro
 def get_fewshot_examples(
     dataset_name: str, num_examples: int | None = None
 ) -> list[renderers.Message]:
-    """Get few-shot examples for the specified dataset."""
+    """Get few-shot examples for the specified dataset.
+    
+    Args:
+        dataset_name: Name of the dataset to get examples for.
+        num_examples: Number of few-shot examples to return.
+            - None: Return all available examples (context distillation with full context)
+            - 0: Return empty list (regular on-policy distillation, no context)
+            - N > 0: Return N examples (context distillation with limited context)
+    
+    Returns:
+        List of messages for few-shot context. Empty list means regular distillation.
+    """
+    # If num_examples is explicitly 0, return empty list (regular distillation mode)
+    if num_examples == 0:
+        return []
+    
     if dataset_name == "recruiting":
         examples = RECRUITING_FEWSHOT_EXAMPLES
     else:
@@ -138,15 +168,18 @@ def get_fewshot_examples(
 
 
 # ============================================================================
-# Context distillation environment and dataset
+# Distillation environment and dataset (with optional context)
 # ============================================================================
 
 
 class ContextDistillationEnv(PromptOnlyEnv):
-    """Environment for context distillation where student has NO few-shot context.
+    """Environment for on-policy distillation with optional context (few-shot examples).
 
-    The student receives only the problem prompt. The few-shot examples are stored
-    separately and used only by the teacher for KL penalty computation.
+    Supports two modes:
+    1. Context distillation: Student sees only the problem, teacher sees few-shot + problem
+    2. Regular distillation: Both student and teacher see the same prompt (no few-shot)
+    
+    The mode is determined by whether fewshot_examples is empty or not.
     """
 
     def __init__(
@@ -162,23 +195,34 @@ class ContextDistillationEnv(PromptOnlyEnv):
         self.problem = problem
         self.question_suffix = question_suffix
         # Store few-shot examples for teacher (used in KL computation)
+        # If empty, teacher will see the same prompt as student (regular distillation)
         self.fewshot_examples = fewshot_examples
 
     def get_teacher_prompt(self) -> tinker.ModelInput:
-        """Build the teacher's prompt WITH few-shot examples."""
+        """Build the teacher's prompt, optionally WITH few-shot examples.
+        
+        If fewshot_examples is empty, returns the same prompt as the student
+        (regular on-policy distillation). Otherwise, prepends few-shot examples
+        to the teacher's prompt (context distillation).
+        """
         convo = self.fewshot_examples + [
             {"role": "user", "content": self.problem + self.question_suffix},
         ]
         return self.renderer.build_generation_prompt(convo)
+    
+    @property
+    def is_context_distillation(self) -> bool:
+        """Return True if using context distillation (teacher has few-shot examples)."""
+        return len(self.fewshot_examples) > 0
 
 
 @dataclass(frozen=True)
 class ContextDistillationGroupBuilder(EnvGroupBuilder):
-    """Builder for context distillation environment groups."""
+    """Builder for on-policy distillation environment groups (with optional context)."""
 
     env_thunk: Callable[[], ContextDistillationEnv]
     num_envs: int
-    dataset_name: str = "context_distillation"
+    dataset_name: str = "distillation"
 
     async def make_envs(self) -> Sequence[Env]:
         return [self.env_thunk() for _ in range(self.num_envs)]
@@ -193,9 +237,13 @@ class ContextDistillationGroupBuilder(EnvGroupBuilder):
 
 
 class ContextDistillationDataset(RLDataset):
-    """Dataset for context distillation.
+    """Dataset for on-policy distillation with optional context.
 
-    The student sees only the problem. The teacher sees few-shot + problem.
+    Supports two modes:
+    - Context distillation: Student sees only problem, teacher sees few-shot + problem
+    - Regular distillation: Both student and teacher see the same prompt (no few-shot)
+    
+    The mode is determined by whether fewshot_examples is empty or not.
     """
 
     def __init__(
@@ -455,7 +503,11 @@ async def incorporate_kl_penalty(
 
 @chz.chz
 class Config:
-    """Configuration for context distillation training."""
+    """Configuration for on-policy distillation training (with optional context).
+    
+    When num_fewshot_examples is None or >0, context distillation is used.
+    When num_fewshot_examples is 0, regular on-policy distillation is used.
+    """
 
     model_name: str
     teacher_model: str
@@ -465,6 +517,10 @@ class Config:
 
     dataset_name: str = "recruiting"
     candidates_path: str | None = None
+    # Number of few-shot examples for context distillation:
+    # - None: Use all available examples
+    # - 0: No examples (regular on-policy distillation)
+    # - N > 0: Use N examples
     num_fewshot_examples: int | None = None
     groups_per_batch: int = 16
     group_size: int = 4
@@ -640,6 +696,9 @@ async def main(cfg: Config):
     # Get few-shot examples and question suffix
     fewshot_examples = get_fewshot_examples(cfg.dataset_name, cfg.num_fewshot_examples)
     question_suffix = ""  # No suffix needed for recruiting messages
+    
+    # Determine distillation mode based on whether we have few-shot examples
+    is_context_distillation = len(fewshot_examples) > 0
 
     # Load dataset (only recruiting is supported)
     if cfg.dataset_name != "recruiting":
@@ -659,6 +718,9 @@ async def main(cfg: Config):
     train_problems = train_problems.copy()
     rng.shuffle(train_problems)
 
+    # Use appropriate dataset name suffix based on mode
+    dataset_suffix = "context_distill" if is_context_distillation else "distill"
+    
     dataset = ContextDistillationDataset(
         problems=train_problems,
         batch_size=cfg.groups_per_batch,
@@ -666,16 +728,23 @@ async def main(cfg: Config):
         renderer=renderer,
         fewshot_examples=fewshot_examples,
         question_suffix=question_suffix,
-        dataset_name=f"{cfg.dataset_name}_context_distill",
+        dataset_name=f"{cfg.dataset_name}_{dataset_suffix}",
     )
 
     batches_per_epoch = len(dataset)
     total_steps = max(batches_per_epoch, cfg.min_steps)
     num_epochs = math.ceil(total_steps / batches_per_epoch) if batches_per_epoch > 0 else 1
     
+    # Log mode information
+    mode_str = "context distillation" if is_context_distillation else "regular on-policy distillation"
+    
     logger.info(f"Dataset has {batches_per_epoch} batches ({len(train_problems)} problems)")
     logger.info(f"Will train for {total_steps} steps ({num_epochs} epochs)")
-    logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher")
+    logger.info(f"Mode: {mode_str}")
+    if is_context_distillation:
+        logger.info(f"Using {len(fewshot_examples) // 2} few-shot examples for teacher (student sees none)")
+    else:
+        logger.info("Teacher and student see the same prompt (no few-shot context)")
 
     # Create evaluator if rubric exists
     # IMPORTANT: Use test split (last 20%) to avoid evaluating on training data
@@ -843,7 +912,12 @@ async def main(cfg: Config):
 
 @chz.chz
 class CLIConfig:
-    """Command-line configuration for on-policy context distillation."""
+    """Command-line configuration for on-policy distillation (with optional context).
+    
+    Supports two modes:
+    - Context distillation: Set num_fewshot_examples=None (all) or N>0 (limited)
+    - Regular distillation: Set num_fewshot_examples=0 (no context)
+    """
 
     # Model configuration
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
@@ -857,6 +931,10 @@ class CLIConfig:
     # Dataset configuration
     dataset: str = "recruiting"
     candidates_path: str | None = None
+    # Number of few-shot examples for context distillation:
+    # - None: Use all available examples (context distillation with full context)
+    # - 0: No examples (regular on-policy distillation)
+    # - N > 0: Use N examples (context distillation with limited context)
     num_fewshot_examples: int | None = None
 
     # Training hyperparameters
@@ -892,22 +970,35 @@ class CLIConfig:
 
 async def cli_main(cli_config: CLIConfig):
     """Convert CLI config to full config and run training."""
+    # Determine if we're doing context distillation or regular distillation
+    # num_fewshot_examples=0 means regular distillation (no context)
+    # num_fewshot_examples=None or >0 means context distillation
+    is_context_distillation = cli_config.num_fewshot_examples != 0
+    
     # Create log path if not specified
     if cli_config.log_path is not None:
         log_path = cli_config.log_path
     else:
         model_name = cli_config.model_name.replace("/", "-")
-        fewshot_str = (
-            f"{cli_config.num_fewshot_examples}shot"
-            if cli_config.num_fewshot_examples
-            else "fullshot"
-        )
+        if is_context_distillation:
+            fewshot_str = (
+                f"{cli_config.num_fewshot_examples}shot"
+                if cli_config.num_fewshot_examples
+                else "fullshot"
+            )
+            mode_prefix = "context-distill"
+            subdir = "context_distillation"
+        else:
+            fewshot_str = "nocontext"
+            mode_prefix = "distill"
+            subdir = "distillation"
+        
         run_name = (
-            f"context-distill-{cli_config.dataset}-{fewshot_str}-{model_name}-"
+            f"{mode_prefix}-{cli_config.dataset}-{fewshot_str}-{model_name}-"
             f"{cli_config.lora_rank}rank-{cli_config.learning_rate}lr-"
             f"{cli_config.groups_per_batch}batch-{datetime.now().strftime('%Y-%m-%d-%H-%M')}"
         )
-        log_path = os.path.expanduser(f"~/tinker-examples/context_distillation/{run_name}")
+        log_path = os.path.expanduser(f"~/tinker-examples/{subdir}/{run_name}")
 
     wandb_name = cli_config.wandb_name or os.path.basename(log_path)
 
