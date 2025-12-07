@@ -15,21 +15,21 @@ Key concepts:
 - Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # Recruiting outreach with context distillation
+    # Recruiting outreach with context distillation (default 10 steps)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
         candidates_path=data/candidates.json \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
-        lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # With Llama model
+    # With custom number of training steps
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=meta-llama/Llama-3.1-8B \\
+        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
         candidates_path=data/candidates.json \\
+        min_steps=50 \\
         learning_rate=1e-4 \\
         groups_per_batch=8 \\
         wandb_project=cookbook_context_distillation
@@ -464,7 +464,6 @@ async def incorporate_context_kl_penalty(
     """
     # Build teacher prompts with few-shot context
     teacher_full_sequences = []
-    response_start_positions = []
 
     for datum, env in zip(data_D, envs_D):
         # Get the teacher's prompt (with few-shot examples)
@@ -492,9 +491,6 @@ async def incorporate_context_kl_penalty(
         )
         teacher_full_sequences.append(teacher_full)
 
-        # Track where the response starts in teacher's sequence
-        response_start_positions.append(teacher_prompt_len)
-
     # Compute teacher logprobs on full sequences
     teacher_all_logprobs = await asyncio.gather(
         *[
@@ -507,73 +503,74 @@ async def incorporate_context_kl_penalty(
     total_kl = 0.0
     total_tokens = 0
 
-    # Debug logging for first datum
-    if data_D:
-        first_response_start = response_start_positions[0]
-        first_teacher_logprobs = teacher_all_logprobs[0]
-        logger.debug(
-            f"KL debug: teacher_prompt_len={first_response_start}, "
-            f"teacher_logprobs_len={len(first_teacher_logprobs)}, "
-            f"student_logprobs_len={len(data_D[0].loss_fn_inputs['logprobs'].to_torch())}"
-        )
-
     for i, datum in enumerate(data_D):
-        # Get student's logprobs for response
+        # Get student's logprobs (includes prompt + response)
         student_logprobs = datum.loss_fn_inputs["logprobs"].to_torch()
+        num_student_tokens = len(student_logprobs)
         mask = datum.loss_fn_inputs["mask"].to_torch().float()
+        
+        if num_student_tokens == 0:
+            continue
 
-        # Get teacher's logprobs for response tokens
-        # teacher_all_logprobs[i] gives logprobs for all tokens in the sequence
-        # We need logprobs for response tokens starting from response_start_positions[i]
-        response_start = response_start_positions[i]
+        # Get teacher's logprobs
+        # teacher_all_logprobs[i] gives logprobs for the full sequence (few_shot + teacher_prompt + response)
         teacher_logprobs_full = teacher_all_logprobs[i]
-
-        # The logprobs array is offset by 1: logprobs[i] = log P(token[i+1] | tokens[0:i+1])
-        # So for the first response token at position P, we need logprobs[P-1]
-        # This gives us log P(token[P] | tokens[0:P]) = log P(first_response | teacher_prompt)
-        logprob_start_idx = max(0, response_start - 1)
-        teacher_response_logprobs = torch.tensor(
-            teacher_logprobs_full[logprob_start_idx:]
+        
+        # Align by taking the last N tokens from teacher, where N is length of student sequence
+        # This aligns the response parts (and potentially the prompt parts)
+        # Since we use the mask, we only care that the response parts align
+        teacher_aligned_logprobs = torch.tensor(
+            teacher_logprobs_full[-num_student_tokens:] if num_student_tokens <= len(teacher_logprobs_full) 
+            else teacher_logprobs_full
         )
-
-        # Make sure lengths match
-        min_len = min(len(student_logprobs), len(teacher_response_logprobs))
-        student_logprobs = student_logprobs[:min_len]
-        teacher_response_logprobs = teacher_response_logprobs[:min_len]
-        mask = mask[:min_len]
+        
+        # Make sure lengths match (should match unless teacher was shorter than student)
+        min_len = min(len(student_logprobs), len(teacher_aligned_logprobs))
+        if min_len == 0:
+            continue
+            
+        student_lp = student_logprobs[:min_len]
+        teacher_lp = teacher_aligned_logprobs[:min_len]
+        current_mask = mask[:min_len]
 
         # Compute reverse KL: KL[student || teacher] = student_logprobs - teacher_logprobs
-        reverse_kl = (student_logprobs - teacher_response_logprobs) * mask
+        # Apply mask to only penalize response tokens (not prompt)
+        reverse_kl = (student_lp - teacher_lp) * current_mask
 
         # Compute KL advantages (negative KL as reward)
-        kl_advantages = -kl_penalty_coef * mask * reverse_kl
+        kl_advantages = -kl_penalty_coef * reverse_kl
         if kl_discount_factor > 0:
             kl_advantages = torch.tensor(
                 discounted_future_sum_vectorized(kl_advantages.numpy(), kl_discount_factor)
             )
 
         # Update advantages in datum
-        # Need to pad kl_advantages back to original length if truncated
-        original_len = len(datum.loss_fn_inputs["advantages"].to_torch())
+        original_advantages = datum.loss_fn_inputs["advantages"].to_torch()
+        original_len = len(original_advantages)
+        
+        # Pad or truncate kl_advantages to match original length
         if len(kl_advantages) < original_len:
             padding = torch.zeros(original_len - len(kl_advantages))
             kl_advantages = torch.cat([kl_advantages, padding])
+        elif len(kl_advantages) > original_len:
+            kl_advantages = kl_advantages[:original_len]
 
         datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(
-            datum.loss_fn_inputs["advantages"].to_torch() + kl_advantages
+            original_advantages + kl_advantages
         )
 
         # Accumulate metrics
         total_kl += reverse_kl.sum().item()
-        total_tokens += mask.sum().item()
+        total_tokens += current_mask.sum().item()
 
-        # Debug logging for first few datums
-        if i < 2:
-            logger.debug(
-                f"KL debug datum {i}: min_len={min_len}, mask_sum={mask.sum().item():.0f}, "
-                f"student_lp_mean={student_logprobs.mean().item():.4f}, "
-                f"teacher_lp_mean={teacher_response_logprobs.mean().item():.4f}, "
-                f"kl_mean={reverse_kl.mean().item():.4f}"
+        # Debug logging for first datum
+        if i == 0:
+            kl_mean = (reverse_kl.sum() / (current_mask.sum() + 1e-6)).item()
+            logger.info(
+                f"KL debug: student_tokens={num_student_tokens}, teacher_logprobs_len={len(teacher_logprobs_full)}, "
+                f"min_len={min_len}, mask_sum={current_mask.sum().item()}, "
+                f"student_lp_mean={student_lp.mean().item():.4f}, "
+                f"teacher_lp_mean={teacher_lp.mean().item():.4f}, kl_mean={kl_mean:.4f}"
             )
 
     avg_kl = total_kl / total_tokens if total_tokens > 0 else 0.0
