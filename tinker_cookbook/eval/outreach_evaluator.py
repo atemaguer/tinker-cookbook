@@ -231,23 +231,12 @@ class OutboundEvaluator(SamplingClientEvaluator):
 
     def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
         system_prompt = (
-            "You are a HARSH grader evaluating recruiter outreach messages. Most real recruiter DMs are templated spam.\n"
-            "Your job is to reward genuinely thoughtful, personalized messages and penalize lazy, generic outreach.\n\n"
-            "GRADING CALIBRATION:\n"
-            "- Score 25+: Exceptional. Genuinely personalized, addresses specific details, acknowledges challenges. RARE.\n"
-            "- Score 18-24: Good. Shows effort, mentions specifics, but may have some generic elements.\n"
-            "- Score 12-17: Mediocre. Template with blanks filled in. Mentions candidate's name and skills but no real insight.\n"
-            "- Score <12: Poor. Generic spam that could be sent to anyone. Templated language, no specific details.\n\n"
-            "BE STRICT. Apply penalties aggressively for:\n"
-            "- Generic phrases ('your impressive background', 'great opportunity')\n"
-            "- Copy-pasting from the candidate profile without adding insight\n"
-            "- Ignoring obvious mismatches (location, seniority, domain)\n"
-            "- Templated language patterns\n\n"
-            "Return JSON with fields:\n"
-            "{ \"section_scores\": [{\"section_id\": string, \"score\": number, \"comments\": string}], \"penalties\": [{\"reason\": string, \"score\": number}] }\n"
-            "- section_scores: array with one entry per rubric section, score bounded by that section's weight.\n"
-            "- penalties: list of negative adjustments with a short reason (empty array [] if no penalties).\n"
-            "No additional fields. Do not include a total."
+            "You are a grader evaluating recruiter outreach messages. "
+            "Follow the provided rubric EXACTLY. Apply all applicable penalties.\n\n"
+            "Output JSON with:\n"
+            "- section_scores: array with one entry per rubric section (section_id, score, comments)\n"
+            "- penalties: array of penalties applied (reason, score as negative number), or empty array if none\n\n"
+            "Do not include a total score. Do not add extra fields."
         )
         user_payload = {
             "rubric": self.rubric,

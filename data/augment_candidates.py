@@ -1,14 +1,18 @@
 """
-Augment synthetic candidate profiles with DIVERSE, UNIQUE details.
+Augment synthetic candidate profiles with DIVERSE, ROLE-APPROPRIATE details.
 
-This version generates candidates with:
-- Unique project descriptions with specific metrics/technologies
-- Edge cases: career changers, location mismatches, seniority gaps
-- Quirks and unusual backgrounds that require genuine personalization
-- NO pre-stated interest in the role (makes the task harder)
+This version generates candidates whose backgrounds actually match (or intentionally
+mismatch) the target roles. For tutor roles requiring PhDs/domain expertise, we
+generate domain experts. For engineering roles, we generate engineers. etc.
+
+Edge cases are candidates with partial mismatches that require thoughtful outreach:
+- Almost-qualified (missing one key requirement)
+- Overqualified (director applying for IC role)
+- Career changers (relevant transferable skills but different domain)
+- Location/visa mismatches
 
 Usage:
-  python data/augment_candidates.py --roles roles.json --count 25
+  python data/augment_candidates.py --roles data/roles.json --count 50
 """
 
 from __future__ import annotations
@@ -17,42 +21,90 @@ import argparse
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CANDIDATES = BASE_DIR / "data" / "candidates.json"
 DEFAULT_ROLES = BASE_DIR / "data" / "roles.json"
 DEFAULT_FORMATTED = BASE_DIR / "data" / "candidates_formatted.jsonl"
 
-DOMAIN_KEYWORDS = {
-    "ml": ["ml", "model", "training", "inference", "multimodal", "rl", "alignment", "safety", "vision", "audio", "tutor"],
-    "infra": ["infrastructure", "platform", "sre", "storage", "network", "datacenter", "traffic", "scaling", "kubernetes"],
-    "backend": ["backend", "distributed", "api", "microservice", "rust", "c++", "grok", "enterprise"],
-    "data": ["data", "analytics", "etl", "pipeline", "experiment", "product analytics"],
-    "security": ["security", "detection", "response", "appsec", "infra security"],
-    "research": ["research", "science", "evaluation", "epistemics"],
-    "product": ["product manager", "pm", "designer", "design", "growth"],
+
+# =============================================================================
+# ROLE CLASSIFICATION - Map roles to appropriate candidate types
+# =============================================================================
+
+ROLE_CATEGORIES = {
+    "finance_tutor": [
+        "finance tutor", "economics tutor", "accounting", "banking", 
+        "portfolio", "quantitative finance", "sell-side", "personal finance"
+    ],
+    "stem_tutor": [
+        "biology tutor", "chemistry tutor", "physics tutor", "math tutor",
+        "statistics tutor", "pure math", "applied math", "space science",
+        "earth science", "materials science", "medicine tutor"
+    ],
+    "engineering_tutor": [
+        "mechanical engineering tutor", "electrical engineering tutor",
+        "civil engineering tutor", "chemical engineering tutor",
+        "systems engineering tutor", "data science tutor"
+    ],
+    "creative_tutor": [
+        "audio tutor", "image tutor", "video tutor", "video games tutor",
+        "web design tutor", "presentation", "writing tutor", "memes",
+        "personality", "multilingual tutor"
+    ],
+    "legal_tutor": ["legal", "compliance tutor"],
+    "healthcare_tutor": ["healthcare tutor", "administration tutor"],
+    "ml_engineer": [
+        "member of technical staff", "mts", "pre-training", "post-training",
+        "inference", "multimodal", "reasoning", "rl ", "cuda", "jax",
+        "image generation", "video generation", "world model"
+    ],
+    "backend_engineer": ["backend engineer", "rust", "c++"],
+    "frontend_engineer": ["frontend engineer", "react", "design engineer"],
+    "fullstack_engineer": ["fullstack", "product engineer"],
+    "infra_engineer": [
+        "infrastructure", "sre", "site reliability", "platform",
+        "supercomputing", "storage", "observability", "reliability"
+    ],
+    "network_engineer": ["network", "rdma", "networking", "hpc network"],
+    "security_engineer": [
+        "security engineer", "appsec", "detection", "infrasec",
+        "cybersecurity"
+    ],
+    "data_engineer": ["data platform", "data acquisition", "crawling"],
+    "mobile_engineer": ["mobile", "ios", "android"],
+    "operations": [
+        "datacenter", "facilities", "maintenance", "technician",
+        "construction", "fiber", "operations"
+    ],
+    "business": [
+        "recruiter", "hr ", "people operations", "accountant", "controller",
+        "fp&a", "revenue", "sales", "client partner", "growth"
+    ],
+    "specialist": [
+        "specialist", "barista", "security specialist", "ambassador"
+    ],
 }
 
-# Expanded location pools for creating mismatches
-LOCATIONS_MATCH = [
-    "Palo Alto, CA",
-    "San Francisco, CA",
-    "Remote",
-]
 
-LOCATIONS_MISMATCH = [
-    "Berlin, Germany",
-    "Tokyo, Japan",
-    "Sydney, Australia",
-    "Toronto, Canada",
-    "Singapore",
-    "Sao Paulo, Brazil",
-    "Stockholm, Sweden",
-    "Tel Aviv, Israel",
-    "Bangalore, India",
-    "Amsterdam, Netherlands",
-]
+def classify_role(title: str) -> str:
+    """Classify a role title into a candidate category."""
+    t = title.lower()
+    for category, keywords in ROLE_CATEGORIES.items():
+        if any(k in t for k in keywords):
+            return category
+    # Default fallback
+    if "tutor" in t:
+        return "stem_tutor"
+    if "engineer" in t:
+        return "backend_engineer"
+    return "ml_engineer"
+
+
+# =============================================================================
+# NAME GENERATION
+# =============================================================================
 
 FIRST_NAMES = [
     "Ava", "Noah", "Liam", "Mia", "Ethan", "Sofia", "Leo", "Isla", "Maya", "Jude",
@@ -60,6 +112,8 @@ FIRST_NAMES = [
     "Priya", "Ravi", "Sanaa", "Mateo", "Yara", "Samir", "Anya", "Dante", "Lucia", "Rowan",
     "Felix", "Camila", "Omar", "Selene", "Ada", "Hugo", "Imani", "Jonas", "Tara", "Zane",
     "Wei", "Aisha", "Dmitri", "Kenji", "Fatima", "Olga", "Henrik", "Yuki", "Rashid", "Linnea",
+    "Margaret", "William", "James", "Sarah", "Michael", "Jennifer", "Robert", "Linda",
+    "David", "Elizabeth", "Richard", "Barbara", "Charles", "Susan", "Joseph", "Jessica",
 ]
 
 LAST_NAMES = [
@@ -67,401 +121,709 @@ LAST_NAMES = [
     "Singh", "Lopez", "Martinez", "Silva", "Rossi", "Ivanov", "Williams", "Jones",
     "Rahman", "Hernandez", "Smith", "Kaur", "Ali", "Sato", "Dubois", "Kowalski",
     "Costa", "Meier", "Andersson", "Hughes", "Murphy", "Zhang", "Okonkwo", "Petrov",
+    "Thompson", "White", "Harris", "Clark", "Lewis", "Robinson", "Walker", "Young",
 ]
-
-# Real-ish company names for variety
-COMPANIES = [
-    "Stripe", "Anthropic", "DeepMind", "Meta AI", "Google Brain", "OpenAI", "Cohere",
-    "Databricks", "Snowflake", "Scale AI", "Weights & Biases", "Hugging Face",
-    "Cruise", "Waymo", "Tesla Autopilot", "Aurora Innovation", "Nuro",
-    "Figma", "Notion", "Linear", "Vercel", "Supabase", "PlanetScale",
-    "Cloudflare", "Fastly", "Akamai", "HashiCorp", "Confluent", "MongoDB",
-    "Palantir", "Datadog", "Splunk", "Elastic", "New Relic", "Grafana Labs",
-    "Jane Street", "Two Sigma", "Citadel", "HRT", "Jump Trading",
-    "Coinbase", "Ripple", "Circle", "Chainalysis", "Fireblocks",
-    "Instacart", "DoorDash", "Uber Eats", "Grubhub",
-]
-
-# Specific metric templates for unique project descriptions
-PROJECT_METRICS = [
-    "reduced latency from {high}ms to {low}ms",
-    "improved throughput by {pct}%",
-    "cut inference costs by ${amount}K/month",
-    "scaled to {num}M daily active users",
-    "reduced model size by {pct}% while maintaining accuracy",
-    "achieved {pct}% accuracy on {benchmark}",
-    "decreased training time from {high} hours to {low} hours",
-    "processed {num}B tokens/day",
-    "served {num}K QPS at p99 < {low}ms",
-]
-
-# Unique project templates with slots for specifics
-PROJECT_TEMPLATES = {
-    "ml": [
-        "Led migration from {old_framework} to {new_framework}, {metric}",
-        "Built {model_type} fine-tuning pipeline for {use_case}; {metric}",
-        "Designed custom {technique} for {problem}, achieving {metric}",
-        "Shipped {feature} using {tech_stack}; now handles {scale}",
-        "Owned {component} system end-to-end, from training to serving",
-        "Red-teamed {model_name} for {safety_area}; found {num} critical issues",
-        "Created internal {tool_type} that {outcome}",
-        "Collaborated with {team} to build {product}; {impact}",
-    ],
-    "infra": [
-        "Migrated {service} to {cloud/tech}, {metric}",
-        "Built {system_type} from scratch; now handles {scale}",
-        "Debugged {incident_type} affecting {scope}; {outcome}",
-        "Automated {process} using {tools}, saving {time}/week",
-        "Designed {architecture} for {requirement}",
-        "Led on-call rotation for {num} services; achieved {uptime}% uptime",
-    ],
-    "backend": [
-        "Rewrote {service} in {language}, {metric}",
-        "Designed {api_type} API serving {scale}",
-        "Built {feature} that {outcome}",
-        "Migrated {data_amount} from {old_system} to {new_system}",
-        "Optimized {component} reducing {resource} usage by {pct}%",
-    ],
-}
-
-# Quirks and unusual background elements
-QUIRKS = [
-    "former {previous_career} who transitioned to tech",
-    "dropped out of {degree} to join {company}",
-    "self-taught programmer, no CS degree",
-    "published {num} papers on {topic}",
-    "maintainer of {oss_project} ({stars}+ GitHub stars)",
-    "previously founded {startup_type} startup (acquired/failed)",
-    "worked remotely from {num} countries in the past year",
-    "on a career break for {duration} (traveling/family/health)",
-    "dual background in {field1} and {field2}",
-    "speaker at {conference}",
-    "wrote {blog_post} that got {num}K views",
-]
-
-PREVIOUS_CAREERS = ["teacher", "musician", "physicist", "financial analyst", "doctor", "lawyer", "architect", "chef"]
-OSS_PROJECTS = ["vLLM", "LangChain", "FastAPI", "Pydantic", "FAISS", "Transformers", "PyTorch Lightning", "MLflow"]
-CONFERENCES = ["NeurIPS", "ICML", "KDD", "Strange Loop", "QCon", "PyCon", "KubeCon", "re:Invent"]
-TOPICS = ["attention mechanisms", "distributed training", "model compression", "RLHF", "code generation", "multimodal learning"]
-
-
-def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
-
-
-def classify_domain(title: str) -> str:
-    t = title.lower()
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        if any(k in t for k in keywords):
-            return domain
-    return "ml"
 
 
 def synth_name() -> str:
     return f"{random.choice(FIRST_NAMES)} {random.choice(LAST_NAMES)}"
 
 
-def synth_unique_project(domain: str) -> str:
-    """Generate a unique project description with specific details."""
-    templates = PROJECT_TEMPLATES.get(domain, PROJECT_TEMPLATES["ml"])
-    template = random.choice(templates)
-    
-    # Fill in template slots with random specifics
-    substitutions = {
-        "{old_framework}": random.choice(["TensorFlow", "Keras", "custom C++", "legacy PyTorch 1.x"]),
-        "{new_framework}": random.choice(["JAX/Flax", "PyTorch 2.0", "MLX", "Triton"]),
-        "{model_type}": random.choice(["LoRA", "QLoRA", "full fine-tuning", "prefix-tuning", "PEFT"]),
-        "{use_case}": random.choice(["customer support", "code completion", "document summarization", "search ranking", "content moderation"]),
-        "{technique}": random.choice(["attention mechanism", "loss function", "sampling strategy", "data augmentation", "distillation method"]),
-        "{problem}": random.choice(["long-context handling", "multilingual support", "low-resource languages", "domain adaptation"]),
-        "{feature}": random.choice(["real-time inference", "batch prediction", "A/B testing framework", "feature store", "model registry"]),
-        "{tech_stack}": random.choice(["Ray Serve + vLLM", "TensorRT + Triton", "custom CUDA kernels", "ONNX Runtime"]),
-        "{scale}": random.choice(["10K QPS", "100M daily requests", "500GB/day throughput", "1M concurrent users"]),
-        "{component}": random.choice(["embedding", "tokenizer", "inference", "training", "evaluation"]),
-        "{model_name}": random.choice(["Llama-3", "GPT-4", "Claude", "Gemini", "internal 70B model"]),
-        "{safety_area}": random.choice(["jailbreaks", "data leakage", "prompt injection", "harmful content"]),
-        "{num}": str(random.randint(3, 50)),
-        "{tool_type}": random.choice(["eval harness", "debugging tool", "annotation platform", "monitoring dashboard"]),
-        "{outcome}": random.choice(["reduced iteration time by 60%", "caught 3 production bugs pre-launch", "used by 50+ engineers daily"]),
-        "{team}": random.choice(["research", "product", "safety", "infra"]),
-        "{product}": random.choice(["chat feature", "search ranking", "content recommendation", "fraud detection"]),
-        "{impact}": random.choice(["shipped to 10M users", "increased engagement 15%", "reduced support tickets 40%"]),
-        "{metric}": random.choice(PROJECT_METRICS).format(
-            high=random.randint(200, 500),
-            low=random.randint(10, 50),
-            pct=random.randint(20, 80),
-            amount=random.randint(50, 500),
-            num=random.randint(1, 100),
-            benchmark=random.choice(["MMLU", "HumanEval", "GSM8K", "internal benchmark"]),
-        ),
-        "{service}": random.choice(["auth service", "notification system", "payment processor", "search index"]),
-        "{cloud/tech}": random.choice(["Kubernetes", "serverless", "edge compute", "multi-region"]),
-        "{system_type}": random.choice(["job scheduler", "rate limiter", "cache layer", "message queue"]),
-        "{incident_type}": random.choice(["cascading failure", "memory leak", "network partition", "thundering herd"]),
-        "{scope}": random.choice(["50% of traffic", "all EU users", "mobile clients", "enterprise customers"]),
-        "{process}": random.choice(["deployments", "rollbacks", "capacity planning", "incident response"]),
-        "{tools}": random.choice(["Terraform + Pulumi", "custom CLI", "GitHub Actions", "Argo CD"]),
-        "{time}": random.choice(["10 hours", "2 days", "40 engineer-hours"]),
-        "{architecture}": random.choice(["multi-tenant", "event-driven", "CQRS", "sharded"]),
-        "{requirement}": random.choice(["100ms p99 latency", "99.99% availability", "GDPR compliance", "SOC2 audit"]),
-        "{uptime}": str(random.uniform(99.9, 99.99))[:5],
-        "{language}": random.choice(["Rust", "Go", "async Python", "C++"]),
-        "{api_type}": random.choice(["GraphQL", "gRPC", "REST", "streaming"]),
-        "{data_amount}": random.choice(["50TB", "10B rows", "5 years of history"]),
-        "{old_system}": random.choice(["MySQL", "MongoDB", "Cassandra", "Redis"]),
-        "{new_system}": random.choice(["PostgreSQL", "CockroachDB", "TiDB", "DynamoDB"]),
-        "{resource}": random.choice(["memory", "CPU", "network", "storage"]),
-        "{pct}": str(random.randint(20, 70)),
-    }
-    
-    result = template
-    for key, value in substitutions.items():
-        result = result.replace(key, value)
-    return result
+# =============================================================================
+# LOCATION HANDLING
+# =============================================================================
+
+LOCATIONS_US_TECH = ["San Francisco, CA", "Palo Alto, CA", "Seattle, WA", "New York, NY", "Austin, TX"]
+LOCATIONS_US_OTHER = ["Memphis, TN", "Chicago, IL", "Boston, MA", "Denver, CO", "Phoenix, AZ"]
+LOCATIONS_INTERNATIONAL = [
+    "London, UK", "Berlin, Germany", "Tokyo, Japan", "Singapore", "Toronto, Canada",
+    "Sydney, Australia", "Amsterdam, Netherlands", "Dublin, Ireland", "Tel Aviv, Israel",
+    "Bangalore, India", "São Paulo, Brazil", "Stockholm, Sweden", "Paris, France",
+]
+LOCATIONS_REMOTE = ["Remote (US)", "Remote (EU timezone)", "Remote (flexible)"]
 
 
-def synth_quirk() -> str | None:
-    """Generate a unique background quirk (30% chance)."""
-    if random.random() > 0.3:
-        return None
+def pick_location(role: Dict[str, Any], mismatch: bool = False) -> Tuple[str, str, bool]:
+    """
+    Pick candidate location. Returns (location, timezone, has_visa_issue).
+    mismatch=True creates intentional location/visa problems.
+    """
+    role_loc = (role.get("location") or "").lower()
     
-    quirk = random.choice(QUIRKS)
-    substitutions = {
-        "{previous_career}": random.choice(PREVIOUS_CAREERS),
-        "{degree}": random.choice(["PhD", "MS", "undergrad"]),
-        "{company}": random.choice(COMPANIES[:10]),
-        "{num}": str(random.randint(2, 15)),
-        "{topic}": random.choice(TOPICS),
-        "{oss_project}": random.choice(OSS_PROJECTS),
-        "{stars}": str(random.randint(1, 50)) + "K",
-        "{startup_type}": random.choice(["AI", "SaaS", "fintech", "devtools"]),
-        "{duration}": random.choice(["6 months", "1 year", "18 months"]),
-        "{field1}": random.choice(["ML", "economics", "physics", "neuroscience"]),
-        "{field2}": random.choice(["product management", "systems engineering", "data science"]),
-        "{conference}": random.choice(CONFERENCES),
-        "{blog_post}": random.choice(['"Why I Left Big Tech"', '"Scaling LLMs on a Budget"', '"The Death of Fine-Tuning"']),
-    }
+    if mismatch:
+        # Create visa/location issues
+        if random.random() < 0.5:
+            loc = random.choice(LOCATIONS_INTERNATIONAL)
+            return loc, "Not US timezone", True
+        else:
+            # Wrong US location for onsite role
+            if "remote" not in role_loc:
+                return random.choice(LOCATIONS_INTERNATIONAL), "EU/APAC timezone", True
     
-    result = quirk
-    for key, value in substitutions.items():
-        result = result.replace(key, value)
-    return result
+    # Match the role location
+    if "remote" in role_loc:
+        return random.choice(LOCATIONS_REMOTE + LOCATIONS_US_TECH), "Flexible", False
+    if "memphis" in role_loc:
+        return random.choice(["Memphis, TN", "Nashville, TN", "Remote (willing to relocate)"]), "CST", False
+    if "london" in role_loc or "dublin" in role_loc:
+        return random.choice(["London, UK", "Dublin, Ireland", "Remote (UK)"]), "GMT/BST", False
+    
+    return random.choice(LOCATIONS_US_TECH), "PST", False
 
 
-def synth_summary(domain: str, quirk: str | None) -> str:
-    """Generate summary WITHOUT mentioning specific role interest."""
-    templates = {
-        "ml": [
-            "ML engineer focused on production LLM systems.",
-            "Building inference infrastructure for large language models.",
-            "Applied ML engineer with focus on model optimization and deployment.",
-            "Working on RLHF and model alignment.",
-            "Specializing in multimodal models and vision-language systems.",
-        ],
-        "infra": [
-            "Infrastructure engineer scaling distributed systems.",
-            "SRE focused on high-availability model serving.",
-            "Platform engineer building ML infrastructure.",
-            "Specializing in GPU cluster management and networking.",
-        ],
-        "backend": [
-            "Backend engineer building high-throughput APIs.",
-            "Full-stack with backend focus, shipping user-facing products.",
-            "Systems engineer with distributed systems expertise.",
-        ],
-        "data": [
-            "Data engineer building real-time analytics pipelines.",
-            "Analytics engineer focused on experimentation and causal inference.",
-        ],
-        "security": [
-            "Security engineer focused on detection and response.",
-            "AppSec engineer hardening production systems.",
-        ],
-        "research": [
-            "Applied researcher bridging research and production.",
-            "Research engineer focused on evaluation and benchmarking.",
-        ],
-        "product": [
-            "Product manager with technical background.",
-            "Design-focused PM shipping developer tools.",
-        ],
-    }
-    
-    base = random.choice(templates.get(domain, templates["ml"]))
-    if quirk:
-        return f"{base} {quirk.capitalize()}."
-    return base
+# =============================================================================
+# DOMAIN-SPECIFIC PROFILE GENERATORS
+# =============================================================================
+
+# ----- FINANCE/ECONOMICS TUTORS -----
+
+FINANCE_SPECIALIZATIONS = [
+    "macroeconomic policy", "monetary economics", "behavioral finance",
+    "derivatives pricing", "portfolio theory", "corporate finance",
+    "financial accounting", "investment banking", "equity research",
+    "quantitative trading", "risk management", "fixed income",
+]
+
+FINANCE_CREDENTIALS = [
+    "PhD Economics, MIT", "PhD Finance, Wharton", "PhD Economics, Chicago",
+    "PhD Economics, Stanford", "PhD Economics, Harvard", "PhD Finance, NYU Stern",
+    "CFA Charterholder + MBA, Columbia", "PhD Financial Economics, LSE",
+]
+
+FINANCE_INSTITUTIONS = [
+    "Federal Reserve Board", "IMF", "World Bank", "Goldman Sachs Research",
+    "Morgan Stanley", "JPMorgan", "BlackRock", "Bridgewater Associates",
+    "Citadel", "Two Sigma", "AQR Capital", "PIMCO",
+]
+
+FINANCE_PUBLICATIONS = [
+    "Journal of Finance", "Quarterly Journal of Economics", "Review of Financial Studies",
+    "American Economic Review", "Journal of Monetary Economics", "Journal of Financial Economics",
+]
 
 
-def synth_skills(domain: str) -> List[str]:
-    """Generate skills with some noise/variety."""
-    base = {
-        "ml": ["PyTorch", "JAX", "Transformers", "LoRA", "vLLM", "RLHF", "CUDA", "Triton", "TensorRT", "MLflow", "Ray", "DeepSpeed"],
-        "infra": ["Kubernetes", "Terraform", "gRPC", "Prometheus", "Redis", "PostgreSQL", "Linux", "TCP/IP", "BGP", "RDMA"],
-        "backend": ["Python", "Go", "Rust", "TypeScript", "PostgreSQL", "Redis", "Kafka", "gRPC", "GraphQL"],
-        "data": ["Python", "SQL", "Spark", "dbt", "Airflow", "Flink", "BigQuery", "Snowflake"],
-        "security": ["SIEM", "Splunk", "AWS Security", "Threat Modeling", "Incident Response", "Forensics"],
-        "research": ["PyTorch", "JAX", "Eval Design", "Statistical Analysis", "Paper Writing"],
-        "product": ["Product Strategy", "User Research", "SQL", "A/B Testing", "Figma"],
-    }
-    
-    skills = base.get(domain, base["ml"]).copy()
-    random.shuffle(skills)
-    return skills[:random.randint(5, 8)]
-
-
-def synth_experience(domain: str) -> List[Dict[str, Any]]:
-    """Generate experience with UNIQUE companies and specific projects."""
-    titles = {
-        "ml": ["ML Engineer", "Applied Scientist", "ML Platform Engineer", "Research Engineer", "AI Engineer"],
-        "infra": ["Infrastructure Engineer", "SRE", "Platform Engineer", "DevOps Engineer", "Systems Engineer"],
-        "backend": ["Backend Engineer", "Software Engineer", "Senior SWE", "Staff Engineer"],
-        "data": ["Data Engineer", "Analytics Engineer", "Data Scientist"],
-        "security": ["Security Engineer", "Detection Engineer", "AppSec Engineer"],
-        "research": ["Research Engineer", "Research Scientist", "Applied Researcher"],
-        "product": ["Product Manager", "Senior PM", "Product Designer"],
-    }
-    
-    # Pick 2 different companies
-    companies = random.sample(COMPANIES, 2)
-    
-    return [
-        {
-            "company": companies[0],
-            "title": random.choice(titles.get(domain, ["Software Engineer"])),
-            "tenure": random.choice(["1.5 years", "2 years", "2.5 years", "3 years"]),
-            "highlights": [synth_unique_project(domain) for _ in range(random.randint(2, 3))],
-        },
-        {
-            "company": companies[1],
-            "title": random.choice(titles.get(domain, ["Software Engineer"])),
-            "tenure": random.choice(["1 year", "1.5 years", "2 years"]),
-            "highlights": [synth_unique_project(domain) for _ in range(random.randint(1, 2))],
-        },
-    ]
-
-
-def pick_location(role: Dict[str, Any], edge_case: bool) -> tuple[str, str]:
-    """Return (location, timezone). edge_case=True for location mismatches."""
-    role_loc = role.get("location") or ""
-    
-    if edge_case:
-        # 30% chance of significant location mismatch
-        loc = random.choice(LOCATIONS_MISMATCH)
-        tz = "Not aligned with US timezones"
-        return loc, tz
-    
-    # Otherwise roughly match or be remote-flexible
-    if "Remote" in role_loc or random.random() > 0.5:
-        return "Remote", "Flexible (can align to PST)"
-    
-    if "Palo Alto" in role_loc or "San Francisco" in role_loc:
-        return random.choice(LOCATIONS_MATCH[:2]), "PST"
-    
-    return role_loc or random.choice(LOCATIONS_MATCH), "Flexible"
-
-
-def pick_seniority(role: Dict[str, Any], edge_case: bool) -> str:
-    """Pick seniority, potentially mismatched for edge cases."""
-    if edge_case:
-        # Mismatch: senior candidate for junior role or vice versa
-        return random.choice(["director", "principal", "junior", "new grad"])
-    return random.choice(["mid", "senior", "staff"])
-
-
-def build_candidate(role: Dict[str, Any], cid: int, edge_case_pct: float = 0.25) -> Dict[str, Any]:
-    """Build a candidate with unique details. edge_case_pct controls adversarial examples."""
-    domain = classify_domain(role.get("title", ""))
-    is_edge_case = random.random() < edge_case_pct
-    
-    # Sometimes create domain mismatch (e.g., backend engineer for ML role)
-    if is_edge_case and random.random() > 0.5:
-        domain = random.choice(["ml", "infra", "backend", "data"])
-    
-    name = synth_name()
-    location, timezone = pick_location(role, is_edge_case)
-    seniority = pick_seniority(role, is_edge_case)
-    quirk = synth_quirk()
-    skills = synth_skills(domain)
+def build_finance_tutor_profile() -> Dict[str, Any]:
+    spec = random.choice(FINANCE_SPECIALIZATIONS)
+    institution = random.choice(FINANCE_INSTITUTIONS)
+    years = random.randint(5, 20)
     
     return {
+        "domain": "finance",
+        "education": random.choice(FINANCE_CREDENTIALS),
+        "current_title": random.choice([
+            f"Senior Economist at {institution}",
+            f"Associate Professor of Economics",
+            f"Director of Research at {institution}",
+            f"Portfolio Manager at {institution}",
+            f"Quantitative Researcher at {institution}",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "publications": [
+            f"'{random.choice(['The Impact of', 'Modeling', 'A New Approach to', 'Empirical Analysis of'])} {spec.title()}' - {random.choice(FINANCE_PUBLICATIONS)} ({random.randint(2015, 2024)})",
+        ] if random.random() > 0.3 else [],
+        "skills": random.sample([
+            "Econometrics", "Time Series Analysis", "Python", "R", "Stata",
+            "Bloomberg Terminal", "Financial Modeling", "Valuation",
+            "Monte Carlo Simulation", "Factor Models", "GARCH Models",
+        ], k=random.randint(4, 6)),
+        "highlights": [
+            f"{years} years in {spec}",
+            f"Previously at {random.choice(FINANCE_INSTITUTIONS)}",
+            random.choice([
+                "Testified before Congress on monetary policy",
+                "Managed $2B+ AUM portfolio",
+                "Published 15+ peer-reviewed papers",
+                "Developed proprietary trading models",
+                "Taught graduate-level finance courses",
+            ]),
+        ],
+    }
+
+
+# ----- STEM TUTORS (Biology, Chemistry, Physics, Math) -----
+
+STEM_FIELDS = {
+    "biology": {
+        "specs": ["molecular biology", "genetics", "immunology", "neuroscience", "cell biology", "bioinformatics"],
+        "journals": ["Nature", "Cell", "Science", "PNAS", "Nature Genetics"],
+        "institutions": ["NIH", "Broad Institute", "Cold Spring Harbor", "Salk Institute", "HHMI"],
+        "degrees": ["PhD Biology, Harvard", "PhD Molecular Biology, MIT", "PhD Genetics, Stanford", "MD-PhD, UCSF"],
+    },
+    "chemistry": {
+        "specs": ["organic chemistry", "biochemistry", "physical chemistry", "computational chemistry", "materials chemistry"],
+        "journals": ["JACS", "Nature Chemistry", "Angewandte Chemie", "Chemical Reviews"],
+        "institutions": ["Dow Chemical", "BASF", "Merck Research", "Pfizer", "Genentech"],
+        "degrees": ["PhD Chemistry, Caltech", "PhD Organic Chemistry, MIT", "PhD Chemical Biology, Harvard"],
+    },
+    "physics": {
+        "specs": ["quantum mechanics", "condensed matter", "particle physics", "astrophysics", "computational physics"],
+        "journals": ["Physical Review Letters", "Nature Physics", "Science", "JHEP"],
+        "institutions": ["CERN", "Fermilab", "SLAC", "Los Alamos", "NASA JPL", "Bell Labs"],
+        "degrees": ["PhD Physics, Princeton", "PhD Physics, Caltech", "PhD Theoretical Physics, Cambridge"],
+    },
+    "math": {
+        "specs": ["number theory", "topology", "differential geometry", "probability theory", "combinatorics", "analysis"],
+        "journals": ["Annals of Mathematics", "Inventiones", "JAMS", "Acta Mathematica"],
+        "institutions": ["IAS Princeton", "MSRI", "Clay Mathematics", "Fields Institute"],
+        "degrees": ["PhD Mathematics, Princeton", "PhD Mathematics, MIT", "PhD Mathematics, Berkeley"],
+    },
+    "medicine": {
+        "specs": ["internal medicine", "cardiology", "oncology", "neurology", "emergency medicine", "surgery"],
+        "journals": ["NEJM", "Lancet", "JAMA", "BMJ", "Annals of Internal Medicine"],
+        "institutions": ["Mayo Clinic", "Johns Hopkins", "Cleveland Clinic", "Mass General", "UCSF Medical"],
+        "degrees": ["MD, Harvard Medical School", "MD-PhD, Johns Hopkins", "MD, Stanford", "MD, UCSF"],
+    },
+}
+
+
+def build_stem_tutor_profile(field: str = "biology") -> Dict[str, Any]:
+    field_data = STEM_FIELDS.get(field, STEM_FIELDS["biology"])
+    spec = random.choice(field_data["specs"])
+    years = random.randint(8, 25)
+    
+    return {
+        "domain": field,
+        "education": random.choice(field_data["degrees"]),
+        "current_title": random.choice([
+            f"Professor of {field.title()} at {random.choice(['Stanford', 'MIT', 'Harvard', 'Berkeley', 'Caltech'])}",
+            f"Research Scientist at {random.choice(field_data['institutions'])}",
+            f"Senior Scientist at {random.choice(field_data['institutions'])}",
+            f"Associate Professor, {field.title()} Department",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "publications": [
+            f"'{random.choice(['Novel', 'Characterization of', 'Mechanisms of', 'Discovery of'])} {spec.title()}' - {random.choice(field_data['journals'])} ({random.randint(2018, 2024)})",
+        ],
+        "skills": random.sample([
+            "Research Design", "Grant Writing", "Statistical Analysis", "Python", "R",
+            "Lab Management", "Scientific Writing", "Peer Review", "Teaching",
+        ], k=random.randint(4, 6)),
+        "highlights": [
+            f"{years} years research experience in {spec}",
+            f"Published in {random.choice(field_data['journals'])}",
+            random.choice([
+                "H-index of 35+",
+                "NIH R01 grant recipient",
+                "Graduate thesis advisor for 10+ PhDs",
+                "Department teaching award recipient",
+                "Keynote speaker at international conferences",
+            ]),
+        ],
+    }
+
+
+# ----- ML/AI ENGINEERS -----
+
+ML_COMPANIES = [
+    "OpenAI", "Anthropic", "DeepMind", "Google Brain", "Meta AI", "Cohere",
+    "Scale AI", "Hugging Face", "Weights & Biases", "Databricks", "Nvidia",
+]
+
+ML_SPECIALIZATIONS = [
+    "large language models", "reinforcement learning", "multimodal models",
+    "inference optimization", "distributed training", "model alignment",
+    "computer vision", "speech recognition", "recommendation systems",
+]
+
+
+def build_ml_engineer_profile() -> Dict[str, Any]:
+    spec = random.choice(ML_SPECIALIZATIONS)
+    company = random.choice(ML_COMPANIES)
+    years = random.randint(3, 12)
+    
+    return {
+        "domain": "ml_engineering",
+        "education": random.choice([
+            "PhD Machine Learning, CMU", "MS Computer Science, Stanford",
+            "PhD AI, Berkeley", "MS ML, MIT", "BS CS, Stanford (dropped out of PhD)",
+        ]),
+        "current_title": random.choice([
+            f"Senior ML Engineer at {company}",
+            f"Research Engineer at {company}",
+            f"Staff ML Engineer at {company}",
+            f"ML Platform Lead at {company}",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "skills": random.sample([
+            "PyTorch", "JAX", "CUDA", "Triton", "vLLM", "TensorRT",
+            "Distributed Training", "RLHF", "LoRA", "Ray", "Kubernetes",
+        ], k=random.randint(5, 8)),
+        "highlights": [
+            f"Led {spec} team at {company}",
+            random.choice([
+                "Reduced inference latency by 60%",
+                "Scaled training to 10K GPUs",
+                "Shipped model serving 100M+ users",
+                "Published at NeurIPS/ICML",
+                "Open-sourced popular ML library (5K+ stars)",
+            ]),
+            f"{years} years in production ML systems",
+        ],
+    }
+
+
+# ----- BACKEND/INFRA ENGINEERS -----
+
+TECH_COMPANIES = [
+    "Google", "Meta", "Amazon", "Microsoft", "Netflix", "Uber", "Stripe",
+    "Airbnb", "Dropbox", "Cloudflare", "Datadog", "Snowflake", "Confluent",
+]
+
+
+def build_backend_engineer_profile() -> Dict[str, Any]:
+    company = random.choice(TECH_COMPANIES)
+    years = random.randint(4, 15)
+    
+    return {
+        "domain": "backend_engineering",
+        "education": random.choice([
+            "BS Computer Science, Stanford", "MS CS, MIT", "BS CS, Berkeley",
+            "MS Distributed Systems, CMU", "BS CS, Georgia Tech",
+        ]),
+        "current_title": random.choice([
+            f"Senior Software Engineer at {company}",
+            f"Staff Engineer at {company}",
+            f"Backend Tech Lead at {company}",
+            f"Principal Engineer at {company}",
+        ]),
+        "experience_years": years,
+        "specialization": random.choice([
+            "distributed systems", "API design", "database systems",
+            "microservices", "high-performance computing",
+        ]),
+        "skills": random.sample([
+            "Go", "Rust", "Python", "C++", "Kubernetes", "PostgreSQL",
+            "Redis", "Kafka", "gRPC", "GraphQL", "AWS", "GCP",
+        ], k=random.randint(5, 8)),
+        "highlights": [
+            f"Built systems handling {random.choice(['1M', '10M', '100M'])} QPS",
+            f"{years} years at top tech companies",
+            random.choice([
+                "Designed company-wide API gateway",
+                "Led migration from monolith to microservices",
+                "Reduced p99 latency from 500ms to 50ms",
+                "Built real-time data pipeline processing 1TB/day",
+            ]),
+        ],
+    }
+
+
+def build_infra_engineer_profile() -> Dict[str, Any]:
+    company = random.choice(TECH_COMPANIES + ["AWS", "GCP", "Azure"])
+    years = random.randint(5, 15)
+    
+    return {
+        "domain": "infrastructure",
+        "education": random.choice([
+            "BS Computer Science, MIT", "MS Systems, Stanford",
+            "BS CS, Berkeley", "MS CS, CMU",
+        ]),
+        "current_title": random.choice([
+            f"Senior SRE at {company}",
+            f"Staff Infrastructure Engineer at {company}",
+            f"Platform Tech Lead at {company}",
+            f"Principal SRE at {company}",
+        ]),
+        "experience_years": years,
+        "specialization": random.choice([
+            "Kubernetes", "storage systems", "observability",
+            "reliability engineering", "cloud infrastructure",
+        ]),
+        "skills": random.sample([
+            "Kubernetes", "Terraform", "Prometheus", "Linux", "Python",
+            "Go", "AWS", "GCP", "Ansible", "Docker", "Helm",
+        ], k=random.randint(5, 8)),
+        "highlights": [
+            f"Maintained {random.choice(['99.99%', '99.999%'])} uptime for critical services",
+            f"{years} years in infrastructure/SRE",
+            random.choice([
+                "Built Kubernetes platform serving 500+ engineers",
+                "Led incident response for $1M+/hour services",
+                "Reduced cloud costs by 40%",
+                "Designed multi-region disaster recovery",
+            ]),
+        ],
+    }
+
+
+# ----- OPERATIONS/FACILITIES -----
+
+def build_operations_profile() -> Dict[str, Any]:
+    years = random.randint(3, 20)
+    spec = random.choice([
+        "datacenter operations", "facilities management", "construction",
+        "electrical systems", "HVAC systems", "fiber installation",
+    ])
+    
+    return {
+        "domain": "operations",
+        "education": random.choice([
+            "AS Electrical Technology", "BS Facilities Management",
+            "Journeyman Electrician License", "BS Construction Management",
+            "Technical Certificate, HVAC", "High school + 10 years experience",
+        ]),
+        "current_title": random.choice([
+            f"Senior Datacenter Technician at {random.choice(['Equinix', 'Digital Realty', 'CoreSite'])}",
+            f"Facilities Manager at {random.choice(['Google', 'Meta', 'Amazon'])}",
+            f"Construction Supervisor at {random.choice(['Turner', 'Skanska', 'DPR'])}",
+            f"Operations Lead at {random.choice(['AWS', 'Microsoft', 'Oracle'])} datacenter",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "skills": random.sample([
+            "Electrical Systems", "HVAC", "Fire Suppression", "BMS",
+            "Safety Protocols", "Vendor Management", "Preventive Maintenance",
+            "OSHA Certified", "Forklift Certified", "CPR/First Aid",
+        ], k=random.randint(4, 6)),
+        "highlights": [
+            f"{years} years in {spec}",
+            random.choice([
+                "Zero safety incidents in 5+ years",
+                "Managed team of 15+ technicians",
+                "Completed $50M facility buildout",
+                "Reduced downtime by 70%",
+            ]),
+        ],
+    }
+
+
+# ----- BUSINESS/HR -----
+
+def build_business_profile() -> Dict[str, Any]:
+    years = random.randint(4, 15)
+    spec = random.choice([
+        "HR business partnering", "technical recruiting", "people operations",
+        "accounting", "FP&A", "revenue operations",
+    ])
+    
+    companies = ["Google", "Meta", "Netflix", "Stripe", "Airbnb", "Salesforce"]
+    
+    return {
+        "domain": "business",
+        "education": random.choice([
+            "MBA, Wharton", "BS Business Administration, Berkeley",
+            "MS HRM, Cornell", "CPA + BS Accounting, NYU",
+            "MBA, Kellogg", "BA Psychology, Stanford",
+        ]),
+        "current_title": random.choice([
+            f"Senior HRBP at {random.choice(companies)}",
+            f"Technical Recruiter at {random.choice(companies)}",
+            f"Senior Accountant at {random.choice(companies)}",
+            f"FP&A Manager at {random.choice(companies)}",
+            f"People Operations Lead at {random.choice(companies)}",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "skills": random.sample([
+            "Workday", "Greenhouse", "Excel", "SQL", "People Analytics",
+            "Compensation Design", "GAAP", "NetSuite", "Tableau",
+        ], k=random.randint(4, 6)),
+        "highlights": [
+            f"{years} years in {spec}",
+            random.choice([
+                "Scaled org from 50 to 500 employees",
+                "Hired 100+ engineers in 12 months",
+                "Led M&A integration for 3 acquisitions",
+                "Implemented new HRIS for 2000+ employees",
+                "Closed books for IPO",
+            ]),
+        ],
+    }
+
+
+# ----- CREATIVE/CONTENT TUTORS -----
+
+def build_creative_tutor_profile() -> Dict[str, Any]:
+    spec = random.choice([
+        "audio production", "video editing", "game design",
+        "web design", "UX writing", "content strategy",
+    ])
+    years = random.randint(5, 20)
+    
+    return {
+        "domain": "creative",
+        "education": random.choice([
+            "MFA Film Production, USC", "BFA Graphic Design, RISD",
+            "BA Music Production, Berklee", "MS HCI, Carnegie Mellon",
+            "BFA Game Design, NYU", "Self-taught, 15 years professional experience",
+        ]),
+        "current_title": random.choice([
+            f"Senior {spec.title().replace('_', ' ')} at {random.choice(['Spotify', 'Netflix', 'YouTube', 'Adobe'])}",
+            f"Creative Director at {random.choice(['IDEO', 'Pentagram', 'frog design'])}",
+            f"Lead Designer at {random.choice(['Figma', 'Canva', 'InVision'])}",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "skills": random.sample([
+            "Adobe Creative Suite", "Figma", "Pro Tools", "Final Cut",
+            "Unity", "Unreal Engine", "Blender", "After Effects",
+        ], k=random.randint(4, 6)),
+        "highlights": [
+            f"{years} years in {spec}",
+            random.choice([
+                "Emmy-nominated for documentary work",
+                "Designed products used by 50M+ users",
+                "Grammy-winning album credits",
+                "Shipped 3 AAA game titles",
+                "Built design system adopted company-wide",
+            ]),
+        ],
+    }
+
+
+# ----- LEGAL TUTOR -----
+
+def build_legal_tutor_profile() -> Dict[str, Any]:
+    spec = random.choice([
+        "corporate law", "IP law", "regulatory compliance",
+        "privacy law", "employment law", "securities law",
+    ])
+    years = random.randint(8, 25)
+    
+    return {
+        "domain": "legal",
+        "education": random.choice([
+            "JD, Harvard Law School", "JD, Yale Law School", "JD, Stanford Law",
+            "JD, Columbia Law + LLM Tax", "JD, NYU Law",
+        ]),
+        "current_title": random.choice([
+            f"Partner at {random.choice(['Skadden', 'Sullivan & Cromwell', 'Cravath', 'Wachtell'])}",
+            f"General Counsel at {random.choice(['Stripe', 'Airbnb', 'DoorDash'])}",
+            f"VP Legal at {random.choice(['Google', 'Meta', 'Microsoft'])}",
+            f"Of Counsel at {random.choice(['Wilson Sonsini', 'Cooley', 'Fenwick'])}",
+        ]),
+        "experience_years": years,
+        "specialization": spec,
+        "bar_admissions": random.sample(["California", "New York", "Delaware", "DC"], k=random.randint(1, 3)),
+        "skills": ["Legal Research", "Contract Drafting", "Regulatory Compliance", "M&A", "Litigation"],
+        "highlights": [
+            f"{years} years practicing {spec}",
+            random.choice([
+                "Led $10B+ M&A transactions",
+                "Argued before federal appellate courts",
+                "Built compliance program for public company",
+                "Managed team of 20+ attorneys",
+            ]),
+        ],
+    }
+
+
+# =============================================================================
+# EDGE CASE GENERATORS - Create intentional mismatches
+# =============================================================================
+
+EDGE_CASE_TYPES = [
+    "overqualified",      # Director applying for IC role
+    "underqualified",     # Missing key requirement (e.g., no PhD for tutor role)
+    "career_changer",     # Different domain but transferable skills
+    "location_mismatch",  # Wrong location/timezone
+    "seniority_gap",      # Wrong level for the role
+]
+
+
+def apply_edge_case(profile: Dict[str, Any], edge_type: str, role: Dict[str, Any]) -> Dict[str, Any]:
+    """Modify a profile to create a specific type of mismatch."""
+    
+    if edge_type == "overqualified":
+        profile["seniority"] = random.choice(["VP", "Director", "C-level", "Partner"])
+        profile["edge_case_note"] = "Overqualified - senior executive applying for IC/senior IC role"
+        profile["highlights"].append(random.choice([
+            "Currently VP-level, seeking IC role for better work-life balance",
+            "Former CEO of startup, looking to return to hands-on work",
+            "Director-level, interested in moving to high-growth company",
+        ]))
+    
+    elif edge_type == "underqualified":
+        # Downgrade education/experience
+        if profile.get("domain") in ["finance", "biology", "chemistry", "physics", "math", "medicine", "legal"]:
+            profile["education"] = random.choice([
+                "BS in related field (no graduate degree)",
+                "Self-taught, no formal education",
+                "Currently enrolled in PhD program (not complete)",
+                "MS only (role requires PhD)",
+            ])
+            profile["edge_case_note"] = "Missing key qualification (e.g., PhD required but not held)"
+        else:
+            profile["experience_years"] = random.randint(1, 2)
+            profile["edge_case_note"] = "Junior candidate for senior role"
+    
+    elif edge_type == "career_changer":
+        original_domain = profile.get("domain", "unknown")
+        new_summary = random.choice([
+            f"Transitioning from {original_domain} to AI/ML after completing bootcamp",
+            f"Former {original_domain} professional pivoting to tech",
+            f"Career changer with 10 years in {original_domain}, learning new domain",
+        ])
+        profile["edge_case_note"] = f"Career changer from {original_domain}"
+        profile["highlights"].append(new_summary)
+    
+    elif edge_type == "location_mismatch":
+        role_loc = role.get("location", "")
+        if "remote" not in role_loc.lower():
+            profile["location"] = random.choice(LOCATIONS_INTERNATIONAL)
+            profile["timezone"] = "Not US timezone"
+            profile["has_visa_issue"] = True
+            profile["edge_case_note"] = "Location/visa mismatch - international candidate for US onsite role"
+    
+    elif edge_type == "seniority_gap":
+        role_title = role.get("title", "").lower()
+        if "senior" in role_title or "staff" in role_title or "principal" in role_title:
+            profile["experience_years"] = random.randint(1, 3)
+            profile["current_title"] = profile["current_title"].replace("Senior ", "").replace("Staff ", "").replace("Principal ", "")
+            profile["edge_case_note"] = "Junior candidate for senior role"
+        else:
+            profile["experience_years"] = random.randint(15, 25)
+            profile["seniority"] = "Director/VP level"
+            profile["edge_case_note"] = "Very senior candidate for entry/mid role"
+    
+    return profile
+
+
+# =============================================================================
+# MAIN CANDIDATE BUILDER
+# =============================================================================
+
+def build_profile_for_role_category(category: str) -> Dict[str, Any]:
+    """Generate an appropriate profile for a role category."""
+    
+    if category == "finance_tutor":
+        return build_finance_tutor_profile()
+    elif category == "stem_tutor":
+        field = random.choice(["biology", "chemistry", "physics", "math", "medicine"])
+        return build_stem_tutor_profile(field)
+    elif category == "engineering_tutor":
+        return build_stem_tutor_profile("math")  # Engineering tutors often have math/physics backgrounds
+    elif category == "creative_tutor":
+        return build_creative_tutor_profile()
+    elif category == "legal_tutor":
+        return build_legal_tutor_profile()
+    elif category == "healthcare_tutor":
+        return build_stem_tutor_profile("medicine")
+    elif category == "ml_engineer":
+        return build_ml_engineer_profile()
+    elif category in ["backend_engineer", "frontend_engineer", "fullstack_engineer", 
+                      "mobile_engineer", "data_engineer", "security_engineer"]:
+        return build_backend_engineer_profile()
+    elif category in ["infra_engineer", "network_engineer"]:
+        return build_infra_engineer_profile()
+    elif category == "operations":
+        return build_operations_profile()
+    elif category in ["business", "specialist"]:
+        return build_business_profile()
+    else:
+        return build_backend_engineer_profile()
+
+
+def build_candidate(role: Dict[str, Any], cid: int, edge_case_pct: float = 0.30) -> Dict[str, Any]:
+    """Build a candidate with appropriate (or intentionally mismatched) background."""
+    
+    role_title = role.get("title", "")
+    category = classify_role(role_title)
+    
+    # Determine if this should be an edge case
+    is_edge_case = random.random() < edge_case_pct
+    edge_type = None
+    
+    if is_edge_case:
+        edge_type = random.choice(EDGE_CASE_TYPES)
+    
+    # Generate base profile appropriate for the role
+    profile = build_profile_for_role_category(category)
+    
+    # Get location
+    loc, tz, visa_issue = pick_location(role, mismatch=(edge_type == "location_mismatch"))
+    
+    # Apply edge case modifications
+    if is_edge_case and edge_type:
+        profile = apply_edge_case(profile, edge_type, role)
+    
+    name = synth_name()
+    
+    # Determine job search status - mix of active/passive
+    openness = random.choice([
+        "Actively looking",
+        "Open to opportunities",
+        "Not actively looking but always curious",
+        "Happy at current role, open to exceptional opportunities",
+        "Exploring after recent layoff",
+        "Passively interested in AI/ML companies",
+        "Looking to relocate",
+        "Open to remote or hybrid",
+    ])
+    
+    # Build final candidate object
+    candidate = {
         "id": f"cand-{cid:03d}",
         "name": name,
-        "title": role.get("title"),
+        "target_role_title": role_title,
         "target_role_url": role.get("absolute_url"),
-        "location": location,
-        "timezone": timezone,
-        "seniority": seniority,
-        "domain": domain,
-        "summary": synth_summary(domain, quirk),
-        "quirk": quirk,  # Store for reference
+        "location": profile.get("location", loc),
+        "timezone": profile.get("timezone", tz),
+        "has_visa_issue": profile.get("has_visa_issue", visa_issue),
+        
+        # Profile details
+        "current_title": profile.get("current_title", ""),
+        "education": profile.get("education", ""),
+        "experience_years": profile.get("experience_years", 5),
+        "domain": profile.get("domain", category),
+        "specialization": profile.get("specialization", ""),
+        
+        "skills": profile.get("skills", []),
+        "highlights": profile.get("highlights", []),
+        "publications": profile.get("publications", []),
+        
+        "openness": openness,
+        
+        # Edge case tracking
         "is_edge_case": is_edge_case,
-        "skills_core": skills,
-        "projects": [synth_unique_project(domain) for _ in range(3)],
-        "recent_experience": synth_experience(domain),
-        "education": random.choice([
-            "BS Computer Science, Stanford",
-            "MS Machine Learning, CMU",
-            "PhD candidate (ABD), MIT",
-            "Self-taught, bootcamp graduate",
-            "BS Physics, converted to ML",
-            "MS Data Science, Berkeley",
-            "BS EE, Georgia Tech",
-            "No degree, 8 years experience",
-        ]),
-        "openness": random.choice([
-            "Actively looking",
-            "Open to hearing about senior roles",
-            "Not actively looking but always curious",
-            "Happy where I am, but open to exceptional opportunities",
-            "Exploring options after recent layoff",
-            "Looking to relocate to Bay Area",
-            "Remote-only, non-negotiable",
-            "Open to contract or full-time",
-        ]),
-        "job_description_excerpt": (role.get("content_text") or role.get("content_html") or "")[:1200].strip(),
+        "edge_case_type": edge_type,
+        "edge_case_note": profile.get("edge_case_note", ""),
+        
+        # Include JD excerpt for context
+        "job_description_excerpt": (role.get("content_text") or role.get("content_html") or "")[:1500].strip(),
     }
+    
+    return candidate
 
 
 def render_profile(c: dict) -> str:
     """Render candidate profile for prompt context."""
     parts = [
         f"Name: {c.get('name')}",
-        f"Target role: {c.get('title')} ({c.get('target_role_url')})",
+        f"Current Role: {c.get('current_title')}",
+        f"Target Role: {c.get('target_role_title')}",
         f"Location: {c.get('location')} | Timezone: {c.get('timezone')}",
-        f"Seniority: {c.get('seniority')} | Domain: {c.get('domain')}",
-        f"Summary: {c.get('summary')}",
     ]
     
-    skills = ", ".join(c.get("skills_core", []))
+    if c.get("has_visa_issue"):
+        parts.append("Note: May require visa sponsorship")
+    
+    parts.append(f"Experience: {c.get('experience_years')} years")
+    parts.append(f"Education: {c.get('education')}")
+    
+    if c.get("specialization"):
+        parts.append(f"Specialization: {c.get('specialization')}")
+    
+    skills = ", ".join(c.get("skills", []))
     if skills:
         parts.append(f"Skills: {skills}")
     
-    projects = c.get("projects") or []
-    if projects:
-        parts.append("Notable projects:\n- " + "\n- ".join(projects))
+    highlights = c.get("highlights") or []
+    if highlights:
+        parts.append("Highlights:\n- " + "\n- ".join(highlights))
     
-    exp = c.get("recent_experience") or []
-    if exp:
-        bullets = []
-        for role in exp:
-            highlights = role.get("highlights") or []
-            hl = "; ".join(highlights)
-            bullets.append(f"{role.get('title')} @ {role.get('company')} ({role.get('tenure')}): {hl}")
-        parts.append("Experience:\n- " + "\n- ".join(bullets))
+    pubs = c.get("publications") or []
+    if pubs:
+        parts.append("Publications:\n- " + "\n- ".join(pubs))
     
-    edu = c.get("education")
-    if edu:
-        parts.append(f"Education: {edu}")
-    
-    open_note = c.get("openness")
-    if open_note:
-        parts.append(f"Job search status: {open_note}")
+    parts.append(f"Job search status: {c.get('openness')}")
     
     jd_excerpt = c.get("job_description_excerpt") or ""
     if jd_excerpt:
-        parts.append("Job excerpt:\n" + jd_excerpt.strip())
+        parts.append("\n--- Target Role Description ---\n" + jd_excerpt.strip())
     
     return "\n".join(parts)
 
@@ -473,31 +835,28 @@ def main():
     parser.add_argument("--formatted", type=Path, default=DEFAULT_FORMATTED)
     parser.add_argument("--count", type=int, default=50, help="Number of candidates to generate")
     parser.add_argument("--seed", type=int, default=None, help="Random seed (default: random)")
-    parser.add_argument("--edge-case-pct", type=float, default=0.25, help="Fraction of adversarial examples")
+    parser.add_argument("--edge-case-pct", type=float, default=0.30, help="Fraction of edge case candidates")
     parser.add_argument("--replace", action="store_true", help="Replace existing candidates instead of appending")
     args = parser.parse_args()
 
     if args.seed is not None:
         random.seed(args.seed)
     
-    roles = load_json(args.roles)
+    roles = json.loads(args.roles.read_text(encoding="utf-8"))
     
     if args.replace or not args.candidates.exists():
         candidates_existing = []
     else:
-        candidates_existing = load_json(args.candidates)
+        candidates_existing = json.loads(args.candidates.read_text(encoding="utf-8"))
 
     start_idx = len(candidates_existing) + 1
     
-    # Prioritize roles with content
+    # Sample roles with content, cycling if needed
     prioritized = [r for r in roles if r.get("content_text")]
     if len(prioritized) < args.count:
         prioritized = roles
     
-    # Sample roles, cycling if needed
-    sampled = []
-    for i in range(args.count):
-        sampled.append(prioritized[i % len(prioritized)])
+    sampled = [prioritized[i % len(prioritized)] for i in range(args.count)]
 
     new_candidates = [
         build_candidate(role, start_idx + i, edge_case_pct=args.edge_case_pct) 
@@ -511,16 +870,35 @@ def main():
         json.dump(all_candidates, fh, ensure_ascii=False, indent=2)
 
     # Write formatted JSONL
-    args.formatted.parent.mkdir(parents=True, exist_ok=True)
     with args.formatted.open("w", encoding="utf-8") as out:
         for c in all_candidates:
             profile_text = render_profile(c)
             record = {"messages": [{"role": "user", "content": profile_text}]}
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    # Print summary
     edge_cases = sum(1 for c in new_candidates if c.get("is_edge_case"))
+    edge_types = {}
+    for c in new_candidates:
+        if c.get("edge_case_type"):
+            edge_types[c["edge_case_type"]] = edge_types.get(c["edge_case_type"], 0) + 1
+    
+    domains = {}
+    for c in new_candidates:
+        d = c.get("domain", "unknown")
+        domains[d] = domains.get(d, 0) + 1
+    
     print(f"Generated {len(new_candidates)} candidates ({edge_cases} edge cases). Total: {len(all_candidates)}")
-    print(f"Wrote {args.candidates} and {args.formatted}")
+    print(f"\nDomain distribution:")
+    for d, count in sorted(domains.items(), key=lambda x: -x[1]):
+        print(f"  {d}: {count}")
+    
+    if edge_types:
+        print(f"\nEdge case types:")
+        for t, count in sorted(edge_types.items(), key=lambda x: -x[1]):
+            print(f"  {t}: {count}")
+    
+    print(f"\nWrote {args.candidates} and {args.formatted}")
 
 
 if __name__ == "__main__":

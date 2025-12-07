@@ -1,89 +1,110 @@
 {
-  "name": "Outbound LinkedIn DM Rubric for xAI Roles (Hard)",
-  "description": "Score an outbound LinkedIn DM. Designed to reward genuine personalization and penalize templated or copy-paste outreach. Max score ~37 before penalties.",
+  "name": "Outbound LinkedIn DM Rubric (Hard Mode)",
+  "description": "Score an outbound LinkedIn DM. Designed to heavily penalize messages that ignore fundamental qualification mismatches. Max score ~30 before penalties. Most messages should score 10-18.",
   "sections": [
     {
-      "id": "relevance_fit",
-      "title": "Relevance & Fit",
+      "id": "qualification_match",
+      "title": "Qualification & Fit Assessment",
       "weight": 10,
       "criteria": [
-        "+3 references SPECIFIC role requirements from JD (not just 'AI' or 'engineering')",
-        "+3 connects candidate's background to role in a non-obvious way (not just keyword matching)",
-        "+2 acknowledges location/onsite/remote constraints appropriately",
-        "+2 appropriate for candidate's seniority level"
+        "+4 explicitly acknowledges how candidate's background maps to role requirements",
+        "+3 identifies SPECIFIC transferable skills (not just 'your experience is relevant')",
+        "+3 addresses obvious gaps or mismatches honestly (if any exist)"
       ],
       "penalties": [
-        "-4 location/eligibility mismatch not acknowledged",
-        "-3 seniority mismatch (e.g., pitching IC role to director-level candidate)",
-        "-3 role requirements don't match candidate's actual background"
+        "-8 ignores fundamental qualification mismatch (e.g., role requires PhD but candidate has BS)",
+        "-6 ignores domain mismatch (e.g., ML engineer for Finance Tutor role requiring CFA)",
+        "-5 ignores location/visa requirements when role is onsite-only",
+        "-4 ignores seniority mismatch (pitching IC role to VP, or senior role to 2-year candidate)"
       ]
     },
     {
       "id": "personalization",
       "title": "Genuine Personalization",
-      "weight": 10,
+      "weight": 8,
       "criteria": [
-        "+4 references a SPECIFIC project/achievement with detail (company name, metric, technology)",
-        "+3 draws a non-obvious connection between candidate's work and role needs",
-        "+3 shows evidence of actually reading the profile (not just keyword extraction)"
+        "+4 references a SPECIFIC achievement with concrete detail (metric, outcome, company)",
+        "+2 draws a non-obvious connection between candidate's work and role",
+        "+2 shows evidence of reading the profile (not just keyword extraction)"
       ],
       "penalties": [
-        "-5 generic phrases that could apply to anyone ('your impressive background', 'your experience')",
-        "-4 copy-pastes or closely paraphrases text from the candidate profile",
-        "-3 mentions skills/projects without connecting them to why they matter for THIS role",
-        "-2 uses candidate's name but nothing else specific"
+        "-6 generic phrases that could apply to anyone ('your impressive background')",
+        "-4 copy-pastes text from the candidate profile without adding insight",
+        "-3 mentions skills without explaining why they matter for THIS role",
+        "-2 uses name but nothing else specific"
       ]
     },
     {
       "id": "value_prop",
-      "title": "Compelling Value Proposition",
-      "weight": 8,
+      "title": "Value Proposition",
+      "weight": 6,
       "criteria": [
         "+3 explains what makes THIS role uniquely interesting (not generic 'great company')",
-        "+3 addresses likely candidate objections or concerns proactively",
-        "+2 mentions specific growth/impact/technical opportunities"
+        "+2 addresses likely candidate concerns proactively",
+        "+1 mentions specific opportunities (growth, impact, technical challenge)"
       ],
       "penalties": [
-        "-3 generic company boilerplate ('fast-paced', 'innovative', 'cutting-edge')",
+        "-4 generic company boilerplate ('fast-paced', 'innovative', 'cutting-edge')",
         "-2 value prop could apply to any company/role"
       ]
     },
     {
       "id": "call_to_action",
       "title": "Call to Action",
-      "weight": 4,
+      "weight": 3,
       "criteria": [
-        "+2 clear, specific CTA (not just 'let me know')",
-        "+2 low-friction ask (quick call, not 'send your resume')"
+        "+2 clear, specific CTA",
+        "+1 low-friction ask (quick call, not 'send resume')"
       ],
       "penalties": [
-        "-2 no clear CTA or multiple conflicting asks",
-        "-1 high-friction CTA (apply now, send documents)"
+        "-2 no clear CTA or multiple conflicting asks"
       ]
     },
     {
       "id": "tone",
       "title": "Tone & Authenticity",
-      "weight": 5,
+      "weight": 3,
       "criteria": [
-        "+2 sounds like a human, not a template",
-        "+2 confident but not pushy or desperate",
-        "+1 appropriate level of formality for LinkedIn"
+        "+1 sounds human, not templated",
+        "+1 appropriate confidence level",
+        "+1 appropriate formality for LinkedIn"
       ],
       "penalties": [
         "-3 obviously templated language patterns",
-        "-2 overly formal or robotic",
-        "-2 desperate/pushy tone ('This is THE opportunity')",
-        "-2 excessive flattery"
+        "-2 desperate/pushy tone",
+        "-2 excessive flattery or buzzwords"
       ]
     }
   ],
   "global_penalties": [
-    "-6 hallucinated facts about candidate (wrong company, fake project, wrong name)",
-    "-5 hallucinated facts about role (wrong title, made-up requirements)",
+    "-10 hallucinated facts about candidate (wrong company, fake project, wrong name)",
+    "-8 hallucinated facts about role (wrong title, made-up requirements)",
+    "-6 message ignores that candidate likely doesn't meet core requirements",
     "-4 message is clearly a template with blanks filled in",
     "-3 over 150 words (LinkedIn DMs should be scannable)",
-    "-2 under 50 words (too brief to be compelling)"
+    "-2 under 40 words (too brief to be compelling)"
   ],
-  "scoring_notes": "Be a harsh grader. Real recruiters send templated spam constantly — the bar for 'good' is much higher than 'has the right keywords'. A score of 25+ should be rare and indicate genuinely thoughtful outreach. Most mediocre messages should score 12-18. Templated messages should score <10."
+  "calibration_examples": [
+    {
+      "scenario": "Finance Tutor role (requires PhD Economics) sent to ML Engineer with MS CS",
+      "bad_message": "Hi! Your experience with PyTorch and distributed systems is impressive. We're hiring Finance Tutors at xAI!",
+      "why_bad": "Completely ignores that candidate has zero finance/economics background and the role requires a PhD in Economics. Score: 2-5",
+      "good_message": "Hi - I know this is unconventional, but xAI's Finance Tutor role involves teaching AI models, not traditional tutoring. Your ML background could bring a unique perspective to how we structure financial reasoning problems. Would you be open to a quick chat about whether this could be interesting?",
+      "why_good": "Acknowledges the mismatch, explains why it might still work, gives candidate context. Score: 18-22"
+    },
+    {
+      "scenario": "Senior SRE role (5+ years required) sent to 2-year junior engineer",
+      "bad_message": "Your infrastructure experience is exactly what we need for our Senior SRE role!",
+      "why_bad": "Ignores that candidate has 2 years experience vs 5+ required. Score: 3-6",
+      "good_message": "Hi - I noticed you've done impressive work on Kubernetes in your 2 years at Datadog. Our Senior SRE role typically needs 5+ years, but we sometimes make exceptions for strong candidates. Would you be interested in a conversation about the role and whether the fit could work?",
+      "why_good": "Honest about the gap, explains why reaching out anyway. Score: 16-20"
+    }
+  ],
+  "scoring_guidance": {
+    "25-30": "Exceptional. Handles any mismatches elegantly, genuinely personalized, compelling value prop. VERY RARE.",
+    "18-24": "Good. Acknowledges candidate's actual background, addresses fit thoughtfully, specific details.",
+    "12-17": "Mediocre. Some personalization but misses key fit issues or uses generic language.",
+    "6-11": "Poor. Template-like, ignores obvious qualification gaps, generic phrases.",
+    "0-5": "Spam. Could be sent to anyone, ignores everything about the candidate's actual background."
+  }
 }
