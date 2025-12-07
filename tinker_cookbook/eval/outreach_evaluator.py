@@ -2,7 +2,8 @@
 Outbound-message evaluator aligned with Tinker SamplingClientEvaluator.
 
 Flow:
-- Dataset items contain a candidate profile and job description.
+- Dataset is loaded from candidates_formatted.jsonl (JSONL with messages format).
+- Each record contains a candidate profile and job description in the user message.
 - Sampling model generates a LinkedIn-style DM.
 - A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json.
 - Grader is calibrated to be VERY HARSH — most messages score 8-16.
@@ -23,8 +24,7 @@ Expected score distribution:
 
 Usage (example):
   python -m tinker_cookbook.eval.outreach_evaluator \
-    --candidates data/candidates.json \
-    --roles data/roles.json \
+    --dataset data/candidates_formatted.jsonl \
     --rubric data/rubric.json \
     --limit 10 \
     --creator-model Qwen/Qwen3-4B-Instruct-2507 \
@@ -79,28 +79,46 @@ class GradedSections(BaseModel):
 
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as fh:
-        
         return json.load(fh)
 
 
-def build_dataset(candidates: List[Dict[str, Any]], roles: List[Dict[str, Any]], limit: int | None = None) -> List[Dict[str, Any]]:
+def load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Load a JSONL file (one JSON object per line)."""
+    items = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    return items
+
+
+def build_dataset_from_jsonl(data: List[Dict[str, Any]], limit: int | None = None) -> List[Dict[str, Any]]:
+    """
+    Build dataset from candidates_formatted.jsonl format.
+    
+    Each item in data should have:
+      {"messages": [{"role": "user", "content": "...candidate profile + job description..."}]}
+    
+    We extract the user content and wrap it with the recruiter instruction prompt.
+    """
     items: List[Dict[str, Any]] = []
-    for idx, cand in enumerate(candidates):
+    for idx, record in enumerate(data):
         if limit and idx >= limit:
             break
-        # match role by URL if present
-        role = next((r for r in roles if r.get("absolute_url") == cand.get("target_role_url")), None)
-        role_text = ""
-        if role:
-            role_text = role.get("content_text") or role.get("content_html") or ""
-        else:
-            role_text = cand.get("job_description_excerpt") or ""
-
+        
+        # Extract the candidate profile + job description from the messages
+        messages = record.get("messages", [])
+        if not messages:
+            continue
+        
+        # The user message contains the candidate profile and job description
+        user_content = messages[0].get("content", "") if messages else ""
+        
         prompt = (
             "You are a recruiter crafting a concise, respectful LinkedIn DM to a candidate about a role.\n"
             "Use the candidate profile and the job description below. Keep it <130 words, clear CTA, no fluff.\n\n"
-            f"Candidate Profile:\n{cand}\n\n"
-            f"Job Description:\n{role_text}\n"
+            f"{user_content}\n"
         )
         items.append({"prompt": prompt})
     return items
@@ -305,10 +323,14 @@ class OutboundEvaluator(SamplingClientEvaluator):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidates", type=Path, default=Path("data/candidates.json"))
-    parser.add_argument("--roles", type=Path, default=Path("roles.json"))
-    parser.add_argument("--rubric", type=Path, default=Path("rubric.json"))
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument(
+        "--dataset", 
+        type=Path, 
+        default=Path("data/candidates_formatted.jsonl"),
+        help="Path to candidates_formatted.jsonl (JSONL with messages format)"
+    )
+    parser.add_argument("--rubric", type=Path, default=Path("data/rubric.json"))
+    parser.add_argument("--limit", type=int, default=None, help="Max examples to evaluate (default: all)")
     parser.add_argument("--renderer", type=str, default="qwen3")
     parser.add_argument("--creator-model", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
     parser.add_argument("--grader-model", type=str, default=DEFAULT_GRADER_MODEL)
@@ -319,10 +341,9 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print draft and grader JSON for each example.")
     args = parser.parse_args()
 
-    candidates = load_json(args.candidates)
-    roles = load_json(args.roles)
+    data = load_jsonl(args.dataset)
     rubric = load_json(args.rubric)
-    dataset = build_dataset(candidates, roles, limit=args.limit)
+    dataset = build_dataset_from_jsonl(data, limit=args.limit)
 
     service_client = tinker.ServiceClient()
     sampling_client = service_client.create_sampling_client(base_model=args.creator_model)
