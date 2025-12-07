@@ -1,40 +1,51 @@
 {
-  "name": "Outbound LinkedIn DM Rubric for xAI Roles",
-  "description": "Score an outbound LinkedIn DM inviting a candidate to consider an xAI role. Input = {candidate_profile, job_description, message}. Output = JSON with per-section scores, comments, and total.",
+  "name": "Outbound LinkedIn DM Rubric for xAI Roles (Hard)",
+  "description": "Score an outbound LinkedIn DM. Designed to reward genuine personalization and penalize templated or copy-paste outreach. Max score ~37 before penalties.",
   "sections": [
     {
       "id": "relevance_fit",
       "title": "Relevance & Fit",
       "weight": 10,
       "criteria": [
-        "+4 references role-specific skills/keywords from the JD (model type, infra, domain, stack)",
-        "+3 aligns location/onsite/remote constraints from JD",
-        "+3 matches seniority/scope implied in JD"
+        "+3 references SPECIFIC role requirements from JD (not just 'AI' or 'engineering')",
+        "+3 connects candidate's background to role in a non-obvious way (not just keyword matching)",
+        "+2 acknowledges location/onsite/remote constraints appropriately",
+        "+2 appropriate for candidate's seniority level"
       ],
       "penalties": [
-        "-3 location/eligibility mismatch",
-        "-2 wrong seniority"
+        "-4 location/eligibility mismatch not acknowledged",
+        "-3 seniority mismatch (e.g., pitching IC role to director-level candidate)",
+        "-3 role requirements don't match candidate's actual background"
       ]
     },
     {
       "id": "personalization",
-      "title": "Personalization",
-      "weight": 8,
+      "title": "Genuine Personalization",
+      "weight": 10,
       "criteria": [
-        "+5 cites candidate-specific experience/project/skill (not generic)",
-        "+3 calls out domain match (e.g., LLM infra, RL, safety, networking, tutoring domain)"
+        "+4 references a SPECIFIC project/achievement with detail (company name, metric, technology)",
+        "+3 draws a non-obvious connection between candidate's work and role needs",
+        "+3 shows evidence of actually reading the profile (not just keyword extraction)"
       ],
       "penalties": [
-        "-2 generic mass-mail tone ('Dear Sir/Madam', 'To whom it may concern')"
+        "-5 generic phrases that could apply to anyone ('your impressive background', 'your experience')",
+        "-4 copy-pastes or closely paraphrases text from the candidate profile",
+        "-3 mentions skills/projects without connecting them to why they matter for THIS role",
+        "-2 uses candidate's name but nothing else specific"
       ]
     },
     {
       "id": "value_prop",
-      "title": "Value Proposition",
-      "weight": 7,
+      "title": "Compelling Value Proposition",
+      "weight": 8,
       "criteria": [
-        "+4 explains why xAI/this role is attractive (mission, impact, tech stack, scope)",
-        "+3 mentions growth/ownership/comp or unique challenges"
+        "+3 explains what makes THIS role uniquely interesting (not generic 'great company')",
+        "+3 addresses likely candidate objections or concerns proactively",
+        "+2 mentions specific growth/impact/technical opportunities"
+      ],
+      "penalties": [
+        "-3 generic company boilerplate ('fast-paced', 'innovative', 'cutting-edge')",
+        "-2 value prop could apply to any company/role"
       ]
     },
     {
@@ -42,36 +53,37 @@
       "title": "Call to Action",
       "weight": 4,
       "criteria": [
-        "+4 clear, low-friction CTA (short chat or link to apply)"
+        "+2 clear, specific CTA (not just 'let me know')",
+        "+2 low-friction ask (quick call, not 'send your resume')"
+      ],
+      "penalties": [
+        "-2 no clear CTA or multiple conflicting asks",
+        "-1 high-friction CTA (apply now, send documents)"
       ]
     },
     {
       "id": "tone",
-      "title": "Tone & Professionalism",
-      "weight": 4,
+      "title": "Tone & Authenticity",
+      "weight": 5,
       "criteria": [
-        "+2 concise, respectful, confident (not pushy)",
-        "+2 avoids hype/spammy phrasing"
-      ]
-    },
-    {
-      "id": "clarity",
-      "title": "Structure & Clarity",
-      "weight": 4,
-      "criteria": [
-        "+2 readable formatting (short paragraphs or bullets)",
-        "+2 no fluff; stays on-topic"
+        "+2 sounds like a human, not a template",
+        "+2 confident but not pushy or desperate",
+        "+1 appropriate level of formality for LinkedIn"
       ],
       "penalties": [
-        "-2 overlong (>180 words) or wall of text"
+        "-3 obviously templated language patterns",
+        "-2 overly formal or robotic",
+        "-2 desperate/pushy tone ('This is THE opportunity')",
+        "-2 excessive flattery"
       ]
     }
   ],
   "global_penalties": [
-    "-4 hallucinated facts about candidate or role",
-    "-3 location/eligibility mismatch (if not already counted)",
-    "-2 wrong seniority (if not already counted)"
+    "-6 hallucinated facts about candidate (wrong company, fake project, wrong name)",
+    "-5 hallucinated facts about role (wrong title, made-up requirements)",
+    "-4 message is clearly a template with blanks filled in",
+    "-3 over 150 words (LinkedIn DMs should be scannable)",
+    "-2 under 50 words (too brief to be compelling)"
   ],
-  "scoring_notes": "Score each section 0–weight. Apply penalties where relevant (can drive section below zero but not below -weight). Sum sections plus penalties to total. Return JSON: {section_scores: {id: {score, comments}}, penalties: [...applied...], total_score}."
+  "scoring_notes": "Be a harsh grader. Real recruiters send templated spam constantly — the bar for 'good' is much higher than 'has the right keywords'. A score of 25+ should be rare and indicate genuinely thoughtful outreach. Most mediocre messages should score 12-18. Templated messages should score <10."
 }
-

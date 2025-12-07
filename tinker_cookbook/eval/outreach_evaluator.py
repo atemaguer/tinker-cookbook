@@ -4,19 +4,23 @@ Outbound-message evaluator aligned with Tinker SamplingClientEvaluator.
 Flow:
 - Dataset items contain a candidate profile and job description.
 - Sampling model generates a LinkedIn-style DM.
-- A grader model (OpenAI gpt-5-mini by default) scores the DM using rubric.json.
+- A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json.
+- Grader is calibrated to be HARSH — most templated messages score <15.
+
+The rubric and candidate data are designed to be challenging:
+- Candidates have unique backgrounds, specific projects with metrics
+- ~25% are "edge cases" with location/seniority/domain mismatches
+- Rubric penalizes generic phrasing, copy-paste, and template language
 
 Usage (example):
   python -m tinker_cookbook.eval.outreach_evaluator \
     --candidates data/candidates.json \
-    --roles roles.json \
-    --rubric rubric.json \
+    --roles data/roles.json \
+    --rubric data/rubric.json \
     --limit 10 \
-    --creator-model Qwen/Qwen2-7B-Instruct \
-    --renderer qwen3
-
-python -m tinker_cookbook.eval.outreach_evaluator   --candidates data/candidates.json   --roles data/roles.json   --rubric data/rubric.json   
---limit 10 --verbose --creator-model Qwen/Qwen2-7B-Instruct --renderer qwen3
+    --creator-model Qwen/Qwen3-4B-Instruct-2507 \
+    --renderer qwen3 \
+    --verbose
 
 Env:
   OPENAI_API_KEY must be set for the grader call.
@@ -227,8 +231,18 @@ class OutboundEvaluator(SamplingClientEvaluator):
 
     def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
         system_prompt = (
-            "You are an objective grader. Score the provided LinkedIn DM using ONLY the rubric.\n"
-            "Do NOT compute the total; only return per-section scores and penalties.\n"
+            "You are a HARSH grader evaluating recruiter outreach messages. Most real recruiter DMs are templated spam.\n"
+            "Your job is to reward genuinely thoughtful, personalized messages and penalize lazy, generic outreach.\n\n"
+            "GRADING CALIBRATION:\n"
+            "- Score 25+: Exceptional. Genuinely personalized, addresses specific details, acknowledges challenges. RARE.\n"
+            "- Score 18-24: Good. Shows effort, mentions specifics, but may have some generic elements.\n"
+            "- Score 12-17: Mediocre. Template with blanks filled in. Mentions candidate's name and skills but no real insight.\n"
+            "- Score <12: Poor. Generic spam that could be sent to anyone. Templated language, no specific details.\n\n"
+            "BE STRICT. Apply penalties aggressively for:\n"
+            "- Generic phrases ('your impressive background', 'great opportunity')\n"
+            "- Copy-pasting from the candidate profile without adding insight\n"
+            "- Ignoring obvious mismatches (location, seniority, domain)\n"
+            "- Templated language patterns\n\n"
             "Return JSON with fields:\n"
             "{ \"section_scores\": [{\"section_id\": string, \"score\": number, \"comments\": string}], \"penalties\": [{\"reason\": string, \"score\": number}] }\n"
             "- section_scores: array with one entry per rubric section, score bounded by that section's weight.\n"
