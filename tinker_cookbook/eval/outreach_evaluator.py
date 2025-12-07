@@ -15,6 +15,9 @@ Usage (example):
     --creator-model Qwen/Qwen2-7B-Instruct \
     --renderer qwen3
 
+python -m tinker_cookbook.eval.outreach_evaluator   --candidates data/candidates.json   --roles data/roles.json   --rubric data/rubric.json   
+--limit 10 --verbose --creator-model Qwen/Qwen2-7B-Instruct --renderer qwen3
+
 Env:
   OPENAI_API_KEY must be set for the grader call.
 """
@@ -29,6 +32,7 @@ from typing import Any, Dict, List
 
 import tinker
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict
 from tinker import types
 from tinker_cookbook import renderers
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
@@ -37,8 +41,32 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 DEFAULT_GRADER_MODEL = "gpt-4.1"
 
+
+class SectionScore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: str
+    score: float
+    comments: str
+
+
+class Penalty(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    score: float
+
+
+class GradedSections(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_scores: List[SectionScore]  # List instead of Dict for OpenAI structured outputs
+    penalties: List[Penalty]  # Required for OpenAI structured outputs; empty list if no penalties
+
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as fh:
+        
         return json.load(fh)
 
 
@@ -63,6 +91,74 @@ def build_dataset(candidates: List[Dict[str, Any]], roles: List[Dict[str, Any]],
         )
         items.append({"prompt": prompt})
     return items
+
+
+# ANSI color codes
+_CYAN = "\033[36m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _print_result(
+    idx: int,
+    total: int,
+    dm: str,
+    score: float,
+    justification: str,
+    section_scores: List[SectionScore],
+    penalties: List[Penalty],
+) -> None:
+    """Pretty-print grading results with colors."""
+    print()
+    print(f"{_CYAN}{_BOLD}{'─' * 60}{_RESET}")
+    print(f"{_CYAN}{_BOLD}  Example {idx}/{total}{_RESET}")
+    print(f"{_CYAN}{_BOLD}{'─' * 60}{_RESET}")
+
+    # Draft message
+    print(f"\n{_BOLD}📝 Draft Message:{_RESET}")
+    print(f"{_DIM}{'─' * 40}{_RESET}")
+    # Indent and wrap the message for readability
+    for line in dm.split("\n"):
+        print(f"  {line}")
+    print(f"{_DIM}{'─' * 40}{_RESET}")
+
+    # Section scores
+    if section_scores:
+        print(f"\n{_BOLD}📊 Section Scores:{_RESET}")
+        for sec in section_scores:
+            # Color based on score (assuming max ~10 per section)
+            if sec.score >= 8:
+                color = _GREEN
+            elif sec.score >= 5:
+                color = _YELLOW
+            else:
+                color = _RED
+            print(f"  {_BOLD}{sec.section_id:20}{_RESET} {color}{sec.score:>5.1f}{_RESET}")
+            if sec.comments:
+                print(f"    {_DIM}{sec.comments}{_RESET}")
+
+    # Penalties
+    if penalties:
+        print(f"\n{_BOLD}⚠️  Penalties:{_RESET}")
+        for pen in penalties:
+            print(f"  {_RED}{pen.score:>+5.1f}{_RESET}  {pen.reason}")
+
+    # Total
+    print()
+    if score >= 80:
+        score_color = _GREEN
+    elif score >= 50:
+        score_color = _YELLOW
+    else:
+        score_color = _RED
+    print(f"{_BOLD}{'─' * 30}{_RESET}")
+    print(f"{_BOLD}  TOTAL SCORE: {score_color}{score:.1f}{_RESET}")
+    print(f"{_BOLD}{'─' * 30}{_RESET}")
+    print()
 
 
 class OutboundEvaluator(SamplingClientEvaluator):
@@ -110,26 +206,34 @@ class OutboundEvaluator(SamplingClientEvaluator):
             tokens: List[int] = resp.sequences[0].tokens
             message: renderers.Message = self.renderer.parse_response(tokens)[0]
             dm_text = message["content"]
-            print(f"[grader] scoring example {idx}/{len(self.dataset)} ...", flush=True)
-            score, justification = self.grade(dm_text, datum["prompt"])
+            dm_clean = (dm_text or "").strip()
+
+            # If the draft is empty/garbled, short-circuit to score 0 without grading.
+            if not dm_clean or dm_clean.startswith("<|im_start|>") or len(dm_clean) < 10:
+                score, justification = 0.0, "Empty or invalid draft; skipped grading."
+                if self.verbose:
+                    _print_result(idx, len(self.dataset), dm_text or "", score, justification, [], [])
+                scores.append(score)
+                continue
+
+            print(f"\033[90m[grader] scoring example {idx}/{len(self.dataset)} ...\033[0m", flush=True)
+            score, justification, section_scores, penalties = self.grade(dm_clean, datum["prompt"])
             if self.verbose:
-                print("=== Draft Message ===")
-                print(dm_text)
-                print("=== Grader ===")
-                print(json.dumps({"score": score, "justification": justification}, ensure_ascii=False, indent=2))
-                print("=====================")
+                _print_result(idx, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
             scores.append(score)
 
         avg = sum(scores) / len(scores) if scores else 0.0
         return {"outreach_score": avg}
 
-    def grade(self, dm: str, prompt: str) -> tuple[float, str]:
+    def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
         system_prompt = (
             "You are an objective grader. Score the provided LinkedIn DM using ONLY the rubric.\n"
+            "Do NOT compute the total; only return per-section scores and penalties.\n"
             "Return JSON with fields:\n"
-            '{ "score": number, "justification": string }\n'
-            "- score: total numeric score\n"
-            "- justification: 1-3 sentences citing rubric aspects; do NOT add extra fields.\n"
+            "{ \"section_scores\": [{\"section_id\": string, \"score\": number, \"comments\": string}], \"penalties\": [{\"reason\": string, \"score\": number}] }\n"
+            "- section_scores: array with one entry per rubric section, score bounded by that section's weight.\n"
+            "- penalties: list of negative adjustments with a short reason (empty array [] if no penalties).\n"
+            "No additional fields. Do not include a total."
         )
         user_payload = {
             "rubric": self.rubric,
@@ -140,33 +244,45 @@ class OutboundEvaluator(SamplingClientEvaluator):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ]
-        resp = self.client.chat.completions.create(
+        resp = self.client.beta.chat.completions.parse(
             model=self.grader_model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "graded_output",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "score": {"type": "number"},
-                            "justification": {"type": "string"},
-                        },
-                        "required": ["score", "justification"],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
-            },
+            messages=messages,  # type: ignore[arg-type]
+            response_format=GradedSections,
         )
-        content = resp.choices[0].message.content
+        # beta.chat.completions.parse returns parsed content under choices[].message.parsed
+        parsed_content = resp.choices[0].message.parsed
+        content = parsed_content.model_dump_json() if parsed_content is not None else (resp.choices[0].message.content or "")
         try:
-            parsed = json.loads(content)
-            return float(parsed.get("score", 0.0)), str(parsed.get("justification", ""))
+            graded = GradedSections.model_validate_json(content)
+            section_scores = graded.section_scores
+            penalties = graded.penalties
+
+            total_sections = 0.0
+            comments: list[str] = []
+            for section in section_scores:
+                total_sections += float(section.score)
+                if section.comments:
+                    comments.append(f"{section.section_id}: {section.comments}")
+
+            total_penalties = 0.0
+            penalty_notes: list[str] = []
+            for pen in penalties:
+                total_penalties += float(pen.score)
+                if pen.reason:
+                    penalty_notes.append(pen.reason)
+
+            total_score = total_sections + total_penalties
+            justification_parts = []
+            if comments:
+                justification_parts.append("; ".join(comments))
+            if penalty_notes:
+                justification_parts.append(f"Penalties: {', '.join(penalty_notes)}")
+            justification = " | ".join(justification_parts) or "Section scores aggregated with penalties."
+
+            return total_score, justification, section_scores, penalties
         except Exception:
             # If parsing fails, treat as zero.
-            return 0.0, ""
+            return 0.0, "Grader response parsing failed.", [], []
 
 
 def main():
