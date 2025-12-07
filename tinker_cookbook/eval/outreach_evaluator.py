@@ -39,12 +39,13 @@ Env:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Dict, List
 
 import tinker
-from openai import OpenAI
+from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict
 from tinker import types
 from tinker_cookbook import renderers
@@ -207,9 +208,10 @@ class OutboundEvaluator(SamplingClientEvaluator):
         # Default to empty convo_prefix to match training (student has no system message)
         self.convo_prefix = convo_prefix if convo_prefix is not None else []
 
+        self.grader_timeout = grader_timeout
         tokenizer = get_tokenizer(model_name)
         self.renderer = renderers.get_renderer(name=renderer_name, tokenizer=tokenizer)
-        self.client = OpenAI(timeout=grader_timeout)
+        self.client = AsyncOpenAI(timeout=grader_timeout)
 
     async def __call__(self, sampling_client: tinker.SamplingClient) -> Dict[str, float]:
         sampling_params = types.SamplingParams(
@@ -219,40 +221,58 @@ class OutboundEvaluator(SamplingClientEvaluator):
             stop=self.renderer.get_stop_sequences(),
         )
 
-        scores: List[float] = []
-        for idx, datum in enumerate(self.dataset, start=1):
-            # Match training's convo construction: convo_prefix + [user message]
-            # The prompt already has instructions baked in from candidates_formatted.jsonl
+        # Build all model inputs upfront
+        model_inputs: List[types.ModelInput] = []
+        for datum in self.dataset:
             convo = self.convo_prefix + [renderers.Message(role="user", content=datum["prompt"])]
-            model_input: types.ModelInput = self.renderer.build_generation_prompt(convo)
-            
-            print(f"[creator] sampling example {idx}/{len(self.dataset)} ...", flush=True)
-            resp: types.SampleResponse = await sampling_client.sample_async(
-                prompt=model_input, num_samples=1, sampling_params=sampling_params
-            )
+            model_inputs.append(self.renderer.build_generation_prompt(convo))
+
+        # Sample all in parallel
+        print(f"[creator] sampling {len(self.dataset)} examples in parallel ...", flush=True)
+        sample_tasks = [
+            sampling_client.sample_async(prompt=mi, num_samples=1, sampling_params=sampling_params)
+            for mi in model_inputs
+        ]
+        responses: List[types.SampleResponse] = await asyncio.gather(*sample_tasks)
+        print(f"[creator] sampling complete.", flush=True)
+
+        # Parse responses and prepare grading tasks
+        drafts: List[tuple[int, str, str]] = []  # (idx, dm_clean, prompt)
+        scores: List[float] = [0.0] * len(self.dataset)
+        skip_results: List[tuple[int, str]] = []  # (idx, dm_text) for empty/invalid
+
+        for idx, (resp, datum) in enumerate(zip(responses, self.dataset)):
             tokens: List[int] = resp.sequences[0].tokens
             message: renderers.Message = self.renderer.parse_response(tokens)[0]
             dm_text = message["content"]
             dm_clean = (dm_text or "").strip()
 
-            # If the draft is empty/garbled, short-circuit to score 0 without grading.
             if not dm_clean or dm_clean.startswith("<|im_start|>") or len(dm_clean) < 10:
-                score, justification = 0.0, "Empty or invalid draft; skipped grading."
-                if self.verbose:
-                    _print_result(idx, len(self.dataset), dm_text or "", score, justification, [], [])
-                scores.append(score)
-                continue
+                skip_results.append((idx, dm_text or ""))
+            else:
+                drafts.append((idx, dm_clean, datum["prompt"]))
 
-            print(f"{_DIM}[grader] scoring example {idx}/{len(self.dataset)} ...{_RESET}", flush=True)
-            score, justification, section_scores, penalties = self.grade(dm_clean, datum["prompt"])
+        # Print skipped results if verbose
+        for idx, dm_text in skip_results:
             if self.verbose:
-                _print_result(idx, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
-            scores.append(score)
+                _print_result(idx + 1, len(self.dataset), dm_text, 0.0, "Empty or invalid draft; skipped grading.", [], [])
+
+        # Grade all valid drafts in parallel
+        if drafts:
+            print(f"{_DIM}[grader] scoring {len(drafts)} examples in parallel ...{_RESET}", flush=True)
+            grade_tasks = [self.grade_async(dm_clean, prompt) for _, dm_clean, prompt in drafts]
+            grade_results = await asyncio.gather(*grade_tasks)
+            print(f"[grader] scoring complete.", flush=True)
+
+            for (idx, dm_clean, _), (score, justification, section_scores, penalties) in zip(drafts, grade_results):
+                scores[idx] = score
+                if self.verbose:
+                    _print_result(idx + 1, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
 
         avg = sum(scores) / len(scores) if scores else 0.0
         return {"outreach_score": avg}
 
-    def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
+    async def grade_async(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
         grader_instructions = self.rubric.get("grader_instructions", "")
         
         system_prompt = (
@@ -275,7 +295,7 @@ class OutboundEvaluator(SamplingClientEvaluator):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ]
-        resp = self.client.beta.chat.completions.parse(
+        resp = await self.client.beta.chat.completions.parse(
             model=self.grader_model,
             messages=messages,  # type: ignore[arg-type]
             response_format=GradedSections,
@@ -358,22 +378,31 @@ def main():
                 top_p=1.0,
                 stop=evaluator.renderer.get_stop_sequences(),
             )
-            for idx, datum in enumerate(dataset, start=1):
-                print(f"[creator] sampling example {idx}/{len(dataset)} ...", flush=True)
+            # Build all prompts and sample in parallel
+            model_inputs = []
+            for datum in dataset:
                 convo = evaluator.convo_prefix + [renderers.Message(role="user", content=datum["prompt"])]
-                model_input: types.ModelInput = evaluator.renderer.build_generation_prompt(convo)
-                resp: types.SampleResponse = await sampling_client.sample_async(
-                    prompt=model_input, num_samples=1, sampling_params=sampling_params
-                )
+                model_inputs.append(evaluator.renderer.build_generation_prompt(convo))
+            
+            print(f"[creator] sampling {len(dataset)} examples in parallel ...", flush=True)
+            sample_tasks = [
+                sampling_client.sample_async(prompt=mi, num_samples=1, sampling_params=sampling_params)
+                for mi in model_inputs
+            ]
+            responses = await asyncio.gather(*sample_tasks)
+            print(f"[creator] sampling complete.\n", flush=True)
+            
+            for idx, resp in enumerate(responses, start=1):
                 tokens: List[int] = resp.sequences[0].tokens
                 message: renderers.Message = evaluator.renderer.parse_response(tokens)[0]
-                print(f"[draft] {message['content'][:200]}...\n")
+                content = message['content'] or ""
+                preview = content[:200] + "..." if len(content) > 200 else content
+                print(f"[draft {idx}/{len(dataset)}] {preview}\n")
             return
 
         metrics = await evaluator(sampling_client)
         print(f"\n{_BOLD}Final metrics:{_RESET} {metrics}")
 
-    import asyncio
     asyncio.run(run_eval())
 
 
