@@ -15,7 +15,7 @@ Key concepts:
 - Context internalization: Model learns to replicate good messaging patterns it never sees
 
 Example usage:
-    # Recruiting outreach with context distillation (uses default candidates_formatted.jsonl)
+    # Recruiting outreach with context distillation (uses default candidates.json)
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
@@ -25,22 +25,11 @@ Example usage:
         lora_rank=128 \\
         wandb_project=cookbook_context_distillation
 
-    # With pre-formatted JSONL (prompts already built in messages array)
+    # With roles.json for richer job descriptions
     python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
         model_name=Qwen/Qwen3-4B-Instruct-2507 \\
         teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
         dataset=recruiting \\
-        candidates_path=data/candidates_formatted.jsonl \\
-        learning_rate=1e-4 \\
-        groups_per_batch=16 \\
-        wandb_project=cookbook_context_distillation
-
-    # With raw candidates.json + roles.json (like outreach_evaluator.py)
-    python -m tinker_cookbook.recipes.distillation.on_policy_context_distillation \\
-        model_name=Qwen/Qwen3-4B-Instruct-2507 \\
-        teacher_model=Qwen/Qwen3-4B-Instruct-2507 \\
-        dataset=recruiting \\
-        candidates_path=data/candidates.json \\
         roles_path=data/roles.json \\
         learning_rate=1e-4 \\
         groups_per_batch=16 \\
@@ -280,6 +269,19 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return items
 
 
+# Instruction to append to prompts that only contain candidate profile data
+LINKEDIN_DM_INSTRUCTION = """You are a recruiter at xAI reaching out to a potential candidate about a job opening.
+
+Write a personalized LinkedIn DM (under 150 words) FROM YOU (the recruiter) TO THE CANDIDATE that:
+- References THEIR specific background and why it caught your attention
+- Explains why this role at xAI might be a great fit for THEM
+- Has a clear call-to-action (e.g., "Would you be open to a quick chat?")
+- Sounds warm and human, not templated
+
+Here is the candidate profile and role:
+"""
+
+
 def build_dataset_from_formatted_jsonl(
     data: list[dict[str, Any]],
     limit: int | None = None,
@@ -341,6 +343,51 @@ def build_dataset_from_formatted_jsonl(
     return items
 
 
+def format_candidate_profile(cand: dict[str, Any]) -> str:
+    """Format a candidate dict into a readable profile string."""
+    # Basic info
+    name = cand.get("name", "Unknown")
+    title = cand.get("title", "Unknown Role")
+    location = cand.get("location", "Unknown")
+    
+    # Skills
+    skills = cand.get("skills_core", [])
+    skills_str = ", ".join(skills[:6]) if skills else "Not specified"
+    
+    # Experience - format recent roles
+    experience = cand.get("recent_experience", [])
+    exp_lines = []
+    for exp in experience[:2]:
+        company = exp.get("company", "")
+        exp_title = exp.get("title", "")
+        tenure = exp.get("tenure", "")
+        highlights = exp.get("highlights", [])
+        if company and exp_title:
+            exp_lines.append(f"- {exp_title} @ {company} ({tenure})")
+            for h in highlights[:2]:
+                exp_lines.append(f"  • {h}")
+    experience_str = "\n".join(exp_lines) if exp_lines else "Not specified"
+    
+    # Projects
+    projects = cand.get("projects", [])
+    projects_str = "\n".join(f"- {p}" for p in projects[:3]) if projects else "Not specified"
+    
+    profile = f"""Name: {name}
+Target role: {title} ({cand.get("target_role_url", "")})
+Location: {location} | Timezone: {cand.get("timezone", "Flexible")}
+Seniority: {cand.get("seniority", "mid")} | Domain: {cand.get("domain", "unknown")}
+Summary: {cand.get("summary", "")}
+Skills: {skills_str}
+Projects:
+{projects_str}
+Experience:
+{experience_str}
+Education: {cand.get("education", "Not specified")}
+Openness: {cand.get("openness", "Not specified")}"""
+    
+    return profile
+
+
 def build_dataset_from_candidates_json(
     candidates: list[dict[str, Any]],
     roles: list[dict[str, Any]] | None = None,
@@ -348,7 +395,7 @@ def build_dataset_from_candidates_json(
 ) -> list[dict[str, Any]]:
     """Build dataset from raw candidates JSON, optionally matching with roles.
     
-    Pattern aligned with outreach_evaluator.py build_dataset().
+    Formats candidate data into readable prompts matching the few-shot example format.
     """
     items: list[dict[str, Any]] = []
     for idx, cand in enumerate(candidates):
@@ -369,13 +416,23 @@ def build_dataset_from_candidates_json(
         if not role_text:
             role_text = cand.get("job_description_excerpt") or ""
         
-        # Build prompt (similar to outreach_evaluator.py)
-        prompt = (
-            "You are a recruiter crafting a concise, respectful LinkedIn DM to a candidate about a role.\n"
-            "Use the candidate profile and the job description below. Keep it <130 words, clear CTA, no fluff.\n\n"
-            f"Candidate Profile:\n{json.dumps(cand, indent=2)}\n\n"
-            f"Job Description:\n{role_text}\n"
-        )
+        # Format candidate profile
+        profile = format_candidate_profile(cand)
+        
+        # Build prompt with job excerpt
+        prompt = f"""You are a recruiter at xAI reaching out to a potential candidate about a job opening.
+
+Write a personalized LinkedIn DM (under 150 words) FROM YOU (the recruiter) TO THE CANDIDATE that:
+- References THEIR specific background and why it caught your attention
+- Explains why this role at xAI might be a great fit for THEM
+- Has a clear call-to-action (e.g., "Would you be open to a quick chat?")
+- Sounds warm and human, not templated
+
+Here is the candidate profile and role:
+
+{profile}
+Job excerpt:
+{role_text[:1000] if role_text else "Not available"}"""
         
         items.append({
             "question": prompt,
@@ -466,144 +523,76 @@ PROBLEM_LOADER_MAP = {
 
 
 # ============================================================================
-# Context-aware KL penalty computation
+# KL penalty computation (adapted from train_on_policy.py)
 # ============================================================================
 
 
 @scope
-async def incorporate_context_kl_penalty(
+async def incorporate_kl_penalty(
     data_D: List[tinker.Datum],
-    envs_D: List[ContextDistillationEnv],
     teacher_client: tinker.SamplingClient,
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> Dict[str, float]:
     """
-    Compute KL penalty where the teacher sees few-shot context but student does not.
-
-    For each datum:
-    1. Build teacher's prompt: few-shot examples + problem
-    2. Append student's response tokens to teacher's prompt
-    3. Compute teacher logprobs on response tokens
-    4. KL = student_logprobs - teacher_logprobs (on response tokens only)
+    Compute reverse KL between the student (log p) and the teacher model (log q).
+    
+    This follows the pattern from train_on_policy.py:
+    - Compute teacher logprobs on the same sequence the student generated
+    - KL = student_logprobs - teacher_logprobs
+    - Adjust advantages in-place as the negative reverse KL
     """
-    # Build teacher prompts with few-shot context
-    teacher_full_sequences = []
-    response_start_positions = []
-
-    for datum, env in zip(data_D, envs_D):
-        # Get the teacher's prompt (with few-shot examples)
-        teacher_prompt = env.get_teacher_prompt()
-        teacher_prompt_len = teacher_prompt.length
-
-        # Get the student's response tokens (from the datum)
-        # The datum's model_input is: student_prompt + response[:-1]
-        # We need to extract just the response part
-        student_prompt = env.renderer.build_generation_prompt(
-            [{"role": "user", "content": env.problem + env.question_suffix}]
-        )
-        student_prompt_len = student_prompt.length
-        student_tokens = datum.model_input.to_ints()
-        response_tokens = student_tokens[student_prompt_len:]
-
-        # Append last target token to get full response
-        last_token = cast(int, datum.loss_fn_inputs["target_tokens"].data[-1])
-        full_response_tokens = list(response_tokens) + [last_token]
-
-        # Build teacher's full sequence: teacher_prompt + response
-        teacher_prompt_tokens = teacher_prompt.to_ints()
-        teacher_full = tinker.ModelInput.from_ints(
-            list(teacher_prompt_tokens) + full_response_tokens
-        )
-        teacher_full_sequences.append(teacher_full)
-
-        # Track where the response starts in teacher's sequence
-        response_start_positions.append(teacher_prompt_len)
-
-    # Compute teacher logprobs on full sequences
-    teacher_all_logprobs = await asyncio.gather(
+    # Build full sequences by appending the last target token
+    full_sequence_inputs_D = [
+        datum.model_input.append_int(cast(int, datum.loss_fn_inputs["target_tokens"].data[-1]))
+        for datum in data_D
+    ]
+    
+    # Compute the teacher's logprobs for each element of the batch
+    teacher_logprobs_D = await asyncio.gather(
         *[
-            teacher_client.compute_logprobs_async(seq)
-            for seq in teacher_full_sequences
+            teacher_client.compute_logprobs_async(sequence_input)
+            for sequence_input in full_sequence_inputs_D
         ]
     )
-
-    # Extract teacher logprobs for response tokens only and compute KL
+    
+    # The reverse KL is computed as KL[p||q] = log p - log q, where
+    #   - p: sampled_logprobs (student)
+    #   - q: teacher_logprobs
+    sampled_logprobs_D = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in data_D]
+    float_masks = [datum.loss_fn_inputs["mask"].to_torch().float() for datum in data_D]
+    
+    # Note: teacher_logprobs[1:] because logprobs are offset by 1
+    reverse_kl = [
+        (sampled_logprobs - torch.tensor(teacher_logprobs[1:])) * mask
+        for teacher_logprobs, sampled_logprobs, mask in safezip(
+            teacher_logprobs_D, sampled_logprobs_D, float_masks
+        )
+    ]
+    
     total_kl = 0.0
-    total_tokens = 0
-
-    # Debug logging for first datum
-    if data_D:
-        first_response_start = response_start_positions[0]
-        first_teacher_logprobs = teacher_all_logprobs[0]
-        logger.debug(
-            f"KL debug: teacher_prompt_len={first_response_start}, "
-            f"teacher_logprobs_len={len(first_teacher_logprobs)}, "
-            f"student_logprobs_len={len(data_D[0].loss_fn_inputs['logprobs'].to_torch())}"
-        )
-
+    total_tokens = 0.0
+    
     for i, datum in enumerate(data_D):
-        # Get student's logprobs for response
-        student_logprobs = datum.loss_fn_inputs["logprobs"].to_torch()
-        mask = datum.loss_fn_inputs["mask"].to_torch().float()
-
-        # Get teacher's logprobs for response tokens
-        # teacher_all_logprobs[i] gives logprobs for all tokens in the sequence
-        # We need logprobs for response tokens starting from response_start_positions[i]
-        response_start = response_start_positions[i]
-        teacher_logprobs_full = teacher_all_logprobs[i]
-
-        # The logprobs array is offset by 1: logprobs[i] = log P(token[i+1] | tokens[0:i+1])
-        # So for the first response token at position P, we need logprobs[P-1]
-        # This gives us log P(token[P] | tokens[0:P]) = log P(first_response | teacher_prompt)
-        logprob_start_idx = max(0, response_start - 1)
-        teacher_response_logprobs = torch.tensor(
-            teacher_logprobs_full[logprob_start_idx:]
-        )
-
-        # Make sure lengths match
-        min_len = min(len(student_logprobs), len(teacher_response_logprobs))
-        student_logprobs = student_logprobs[:min_len]
-        teacher_response_logprobs = teacher_response_logprobs[:min_len]
-        mask = mask[:min_len]
-
-        # Compute reverse KL: KL[student || teacher] = student_logprobs - teacher_logprobs
-        reverse_kl = (student_logprobs - teacher_response_logprobs) * mask
-
-        # Compute KL advantages (negative KL as reward)
-        kl_advantages = -kl_penalty_coef * mask * reverse_kl
+        # The advantage is the negative reverse KL
+        kl_advantages = -kl_penalty_coef * float_masks[i] * reverse_kl[i]
         if kl_discount_factor > 0:
             kl_advantages = torch.tensor(
                 discounted_future_sum_vectorized(kl_advantages.numpy(), kl_discount_factor)
             )
-
-        # Update advantages in datum
-        # Need to pad kl_advantages back to original length if truncated
-        original_len = len(datum.loss_fn_inputs["advantages"].to_torch())
-        if len(kl_advantages) < original_len:
-            padding = torch.zeros(original_len - len(kl_advantages))
-            kl_advantages = torch.cat([kl_advantages, padding])
-
         datum.loss_fn_inputs["advantages"] = tinker.TensorData.from_torch(
             datum.loss_fn_inputs["advantages"].to_torch() + kl_advantages
         )
-
+        
         # Accumulate metrics
-        total_kl += reverse_kl.sum().item()
-        total_tokens += mask.sum().item()
-
-        # Debug logging for first few datums
-        if i < 2:
-            logger.debug(
-                f"KL debug datum {i}: min_len={min_len}, mask_sum={mask.sum().item():.0f}, "
-                f"student_lp_mean={student_logprobs.mean().item():.4f}, "
-                f"teacher_lp_mean={teacher_response_logprobs.mean().item():.4f}, "
-                f"kl_mean={reverse_kl.mean().item():.4f}"
-            )
-
+        total_kl += reverse_kl[i].sum().item()
+        total_tokens += float_masks[i].sum().item()
+    
+    # Compute average reverse KL over the batch for logging
     avg_kl = total_kl / total_tokens if total_tokens > 0 else 0.0
-    logger.info(f"Context KL: total_kl={total_kl:.4f}, total_tokens={total_tokens}, avg_kl={avg_kl:.4f}")
-    return {"teacher_kl": avg_kl}
+    
+    logger.info(f"KL penalty: total_kl={total_kl:.4f}, total_tokens={total_tokens:.0f}, avg_kl={avg_kl:.4f}")
+    return {"teacher_kl": float(avg_kl)}
 
 
 # ============================================================================
@@ -660,7 +649,7 @@ async def prepare_minibatch_with_context(
     kl_penalty_coef: float,
     kl_discount_factor: float,
 ) -> tuple[list[tinker.Datum], dict[str, Any]]:
-    """Prepare minibatch with context-aware KL penalty."""
+    """Prepare minibatch with KL penalty against teacher."""
     metrics = {}
 
     # Compute trajectory metrics
@@ -672,24 +661,15 @@ async def prepare_minibatch_with_context(
         advantages_P = compute_advantages(trajectory_groups_P)
         data_D, metadata_D = assemble_training_data(trajectory_groups_P, advantages_P)
 
-    # Flatten envs to match data_D
-    # metadata has group_idx and traj_idx; traj_idx corresponds to env index
-    envs_D: List[ContextDistillationEnv] = []
-    for metadata in metadata_D:
-        group_idx = metadata["group_idx"]
-        traj_idx = metadata["traj_idx"]  # traj_idx == env index (1:1 mapping)
-        envs_D.append(envs_P_G[group_idx][traj_idx])
-
     # Print one example
     if data_D:
         logger.info(colorize_example(data_D[0], tokenizer, key="mask"))
 
-    # Incorporate context-aware KL penalty
+    # Incorporate KL penalty (using the simpler approach from train_on_policy.py)
     if kl_penalty_coef > 0:
-        with timed("compute_context_kl_penalty", metrics):
-            kl_metrics = await incorporate_context_kl_penalty(
+        with timed("compute_kl_penalty", metrics):
+            kl_metrics = await incorporate_kl_penalty(
                 data_D,
-                envs_D,
                 teacher_client,
                 kl_penalty_coef,
                 kl_discount_factor,
