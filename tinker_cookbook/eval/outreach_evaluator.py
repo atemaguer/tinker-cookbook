@@ -2,18 +2,34 @@
 Outbound-message evaluator aligned with Tinker SamplingClientEvaluator.
 
 Flow:
-- Dataset items contain a candidate profile and job description.
+- Dataset is loaded from candidates_formatted.jsonl (JSONL with messages format).
+- Each record contains a candidate profile and job description in the user message.
 - Sampling model generates a LinkedIn-style DM.
-- A grader model (OpenAI gpt-5-mini by default) scores the DM using rubric.json.
+- A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json.
+- Grader is calibrated to be VERY HARSH — most messages score 8-16.
+
+The rubric and candidate data are designed to be challenging:
+- ~55% of candidates are "edge cases" with subtle mismatches, red flags, or sparse profiles
+- Edge cases include: domain mismatches, outdated experience, job hoppers, sparse profiles
+- Rubric heavily penalizes surface-level personalization and template patterns
+- High scores (20+) require genuine insight, not just restating profile details
+- Even "perfect fit" candidates require nuanced messaging to score well
+
+Expected score distribution:
+- 0-5: Poor/template messages
+- 6-11: Weak, surface-level matching
+- 12-19: Adequate, where most decent messages land
+- 20-27: Strong, uncommon
+- 28-35: Exceptional, extremely rare
 
 Usage (example):
   python -m tinker_cookbook.eval.outreach_evaluator \
-    --candidates data/candidates.json \
-    --roles roles.json \
-    --rubric rubric.json \
+    --dataset data/candidates_formatted.jsonl \
+    --rubric data/rubric.json \
     --limit 10 \
-    --creator-model Qwen/Qwen2-7B-Instruct \
-    --renderer qwen3
+    --creator-model Qwen/Qwen3-4B-Instruct-2507 \
+    --renderer qwen3 \
+    --verbose
 
 Env:
   OPENAI_API_KEY must be set for the grader call.
@@ -29,6 +45,7 @@ from typing import Any, Dict, List
 
 import tinker
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict
 from tinker import types
 from tinker_cookbook import renderers
 from tinker_cookbook.eval.evaluators import SamplingClientEvaluator
@@ -37,32 +54,142 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 
 DEFAULT_GRADER_MODEL = "gpt-4.1"
 
+
+class SectionScore(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_id: str
+    score: float
+    comments: str
+
+
+class Penalty(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+    score: float
+
+
+class GradedSections(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    section_scores: List[SectionScore]  # List instead of Dict for OpenAI structured outputs
+    penalties: List[Penalty]  # Required for OpenAI structured outputs; empty list if no penalties
+
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def build_dataset(candidates: List[Dict[str, Any]], roles: List[Dict[str, Any]], limit: int | None = None) -> List[Dict[str, Any]]:
+def load_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Load a JSONL file (one JSON object per line)."""
+    items = []
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                items.append(json.loads(line))
+    return items
+
+
+def build_dataset_from_jsonl(data: List[Dict[str, Any]], limit: int | None = None) -> List[Dict[str, Any]]:
+    """
+    Build dataset from candidates_formatted.jsonl format.
+    
+    Each item in data should have:
+      {"messages": [{"role": "user", "content": "...candidate profile + job description..."}]}
+    
+    We extract the user content and wrap it with the recruiter instruction prompt.
+    """
     items: List[Dict[str, Any]] = []
-    for idx, cand in enumerate(candidates):
+    for idx, record in enumerate(data):
         if limit and idx >= limit:
             break
-        # match role by URL if present
-        role = next((r for r in roles if r.get("absolute_url") == cand.get("target_role_url")), None)
-        role_text = ""
-        if role:
-            role_text = role.get("content_text") or role.get("content_html") or ""
-        else:
-            role_text = cand.get("job_description_excerpt") or ""
-
+        
+        # Extract the candidate profile + job description from the messages
+        messages = record.get("messages", [])
+        if not messages:
+            continue
+        
+        # The user message contains the candidate profile and job description
+        user_content = messages[0].get("content", "") if messages else ""
+        
         prompt = (
             "You are a recruiter crafting a concise, respectful LinkedIn DM to a candidate about a role.\n"
             "Use the candidate profile and the job description below. Keep it <130 words, clear CTA, no fluff.\n\n"
-            f"Candidate Profile:\n{cand}\n\n"
-            f"Job Description:\n{role_text}\n"
+            f"{user_content}\n"
         )
         items.append({"prompt": prompt})
     return items
+
+
+# ANSI color codes
+_CYAN = "\033[36m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RESET = "\033[0m"
+
+
+def _print_result(
+    idx: int,
+    total: int,
+    dm: str,
+    score: float,
+    justification: str,
+    section_scores: List[SectionScore],
+    penalties: List[Penalty],
+) -> None:
+    """Pretty-print grading results with colors."""
+    print()
+    print(f"{_CYAN}{_BOLD}{'─' * 60}{_RESET}")
+    print(f"{_CYAN}{_BOLD}  Example {idx}/{total}{_RESET}")
+    print(f"{_CYAN}{_BOLD}{'─' * 60}{_RESET}")
+
+    # Draft message
+    print(f"\n{_BOLD}📝 Draft Message:{_RESET}")
+    print(f"{_DIM}{'─' * 40}{_RESET}")
+    # Indent and wrap the message for readability
+    for line in dm.split("\n"):
+        print(f"  {line}")
+    print(f"{_DIM}{'─' * 40}{_RESET}")
+
+    # Section scores
+    if section_scores:
+        print(f"\n{_BOLD}📊 Section Scores:{_RESET}")
+        for sec in section_scores:
+            # Color based on score (assuming max ~10 per section)
+            if sec.score >= 8:
+                color = _GREEN
+            elif sec.score >= 5:
+                color = _YELLOW
+            else:
+                color = _RED
+            print(f"  {_BOLD}{sec.section_id:20}{_RESET} {color}{sec.score:>5.1f}{_RESET}")
+            if sec.comments:
+                print(f"    {_DIM}{sec.comments}{_RESET}")
+
+    # Penalties
+    if penalties:
+        print(f"\n{_BOLD}⚠️  Penalties:{_RESET}")
+        for pen in penalties:
+            print(f"  {_RED}{pen.score:>+5.1f}{_RESET}  {pen.reason}")
+
+    # Total
+    print()
+    if score >= 80:
+        score_color = _GREEN
+    elif score >= 50:
+        score_color = _YELLOW
+    else:
+        score_color = _RED
+    print(f"{_BOLD}{'─' * 30}{_RESET}")
+    print(f"{_BOLD}  TOTAL SCORE: {score_color}{score:.1f}{_RESET}")
+    print(f"{_BOLD}{'─' * 30}{_RESET}")
+    print()
 
 
 class OutboundEvaluator(SamplingClientEvaluator):
@@ -110,26 +237,39 @@ class OutboundEvaluator(SamplingClientEvaluator):
             tokens: List[int] = resp.sequences[0].tokens
             message: renderers.Message = self.renderer.parse_response(tokens)[0]
             dm_text = message["content"]
-            print(f"[grader] scoring example {idx}/{len(self.dataset)} ...", flush=True)
-            score, justification = self.grade(dm_text, datum["prompt"])
+            dm_clean = (dm_text or "").strip()
+
+            # If the draft is empty/garbled, short-circuit to score 0 without grading.
+            if not dm_clean or dm_clean.startswith("<|im_start|>") or len(dm_clean) < 10:
+                score, justification = 0.0, "Empty or invalid draft; skipped grading."
+                if self.verbose:
+                    _print_result(idx, len(self.dataset), dm_text or "", score, justification, [], [])
+                scores.append(score)
+                continue
+
+            print(f"\033[90m[grader] scoring example {idx}/{len(self.dataset)} ...\033[0m", flush=True)
+            score, justification, section_scores, penalties = self.grade(dm_clean, datum["prompt"])
             if self.verbose:
-                print("=== Draft Message ===")
-                print(dm_text)
-                print("=== Grader ===")
-                print(json.dumps({"score": score, "justification": justification}, ensure_ascii=False, indent=2))
-                print("=====================")
+                _print_result(idx, len(self.dataset), dm_clean, score, justification, section_scores, penalties)
             scores.append(score)
 
         avg = sum(scores) / len(scores) if scores else 0.0
         return {"outreach_score": avg}
 
-    def grade(self, dm: str, prompt: str) -> tuple[float, str]:
+    def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
+        # Include grader instructions from rubric if available
+        grader_instructions = self.rubric.get("grader_instructions", "")
+        
         system_prompt = (
-            "You are an objective grader. Score the provided LinkedIn DM using ONLY the rubric.\n"
-            "Return JSON with fields:\n"
-            '{ "score": number, "justification": string }\n'
-            "- score: total numeric score\n"
-            "- justification: 1-3 sentences citing rubric aspects; do NOT add extra fields.\n"
+            "You are a HARSH grader evaluating recruiter outreach messages. "
+            "Follow the provided rubric EXACTLY. Count specific criteria met and penalties triggered.\n\n"
+            f"{grader_instructions}\n\n"
+            "Output JSON with:\n"
+            "- section_scores: array with one entry per rubric section (section_id, score, comments explaining which criteria were met)\n"
+            "- penalties: array of ALL applicable penalties (reason quoting the specific penalty, score as negative number), or empty array if none\n\n"
+            "Be literal: if you see template phrases like 'impressive background' or 'extensive experience', apply the penalty. "
+            "If the message doesn't explicitly acknowledge a mismatch, don't give credit for implying it.\n"
+            "Do not include a total score. Do not add extra fields."
         )
         user_payload = {
             "rubric": self.rubric,
@@ -140,41 +280,57 @@ class OutboundEvaluator(SamplingClientEvaluator):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
         ]
-        resp = self.client.chat.completions.create(
+        resp = self.client.beta.chat.completions.parse(
             model=self.grader_model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "graded_output",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "score": {"type": "number"},
-                            "justification": {"type": "string"},
-                        },
-                        "required": ["score", "justification"],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                },
-            },
+            messages=messages,  # type: ignore[arg-type]
+            response_format=GradedSections,
         )
-        content = resp.choices[0].message.content
+        # beta.chat.completions.parse returns parsed content under choices[].message.parsed
+        parsed_content = resp.choices[0].message.parsed
+        content = parsed_content.model_dump_json() if parsed_content is not None else (resp.choices[0].message.content or "")
         try:
-            parsed = json.loads(content)
-            return float(parsed.get("score", 0.0)), str(parsed.get("justification", ""))
+            graded = GradedSections.model_validate_json(content)
+            section_scores = graded.section_scores
+            penalties = graded.penalties
+
+            total_sections = 0.0
+            comments: list[str] = []
+            for section in section_scores:
+                total_sections += float(section.score)
+                if section.comments:
+                    comments.append(f"{section.section_id}: {section.comments}")
+
+            total_penalties = 0.0
+            penalty_notes: list[str] = []
+            for pen in penalties:
+                total_penalties += float(pen.score)
+                if pen.reason:
+                    penalty_notes.append(pen.reason)
+
+            total_score = total_sections + total_penalties
+            justification_parts = []
+            if comments:
+                justification_parts.append("; ".join(comments))
+            if penalty_notes:
+                justification_parts.append(f"Penalties: {', '.join(penalty_notes)}")
+            justification = " | ".join(justification_parts) or "Section scores aggregated with penalties."
+
+            return total_score, justification, section_scores, penalties
         except Exception:
             # If parsing fails, treat as zero.
-            return 0.0, ""
+            return 0.0, "Grader response parsing failed.", [], []
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidates", type=Path, default=Path("data/candidates.json"))
-    parser.add_argument("--roles", type=Path, default=Path("roles.json"))
-    parser.add_argument("--rubric", type=Path, default=Path("rubric.json"))
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument(
+        "--dataset", 
+        type=Path, 
+        default=Path("data/candidates_formatted.jsonl"),
+        help="Path to candidates_formatted.jsonl (JSONL with messages format)"
+    )
+    parser.add_argument("--rubric", type=Path, default=Path("data/rubric.json"))
+    parser.add_argument("--limit", type=int, default=None, help="Max examples to evaluate (default: all)")
     parser.add_argument("--renderer", type=str, default="qwen3")
     parser.add_argument("--creator-model", type=str, default="Qwen/Qwen3-4B-Instruct-2507")
     parser.add_argument("--grader-model", type=str, default=DEFAULT_GRADER_MODEL)
@@ -185,10 +341,9 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print draft and grader JSON for each example.")
     args = parser.parse_args()
 
-    candidates = load_json(args.candidates)
-    roles = load_json(args.roles)
+    data = load_jsonl(args.dataset)
     rubric = load_json(args.rubric)
-    dataset = build_dataset(candidates, roles, limit=args.limit)
+    dataset = build_dataset_from_jsonl(data, limit=args.limit)
 
     service_client = tinker.ServiceClient()
     sampling_client = service_client.create_sampling_client(base_model=args.creator_model)
