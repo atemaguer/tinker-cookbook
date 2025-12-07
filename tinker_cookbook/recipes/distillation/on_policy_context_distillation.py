@@ -358,16 +358,6 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return items
 
 
-# Instruction to append to prompts that only contain candidate profile data
-LINKEDIN_DM_INSTRUCTION = """
-
-Write a personalized, professional LinkedIn DM (under 150 words) that:
-- References their specific background and experience
-- Explains why this role at xAI might interest them
-- Has a clear call-to-action
-- Sounds human, not templated"""
-
-
 def build_dataset_from_formatted_jsonl(
     data: list[dict[str, Any]],
     limit: int | None = None,
@@ -376,8 +366,11 @@ def build_dataset_from_formatted_jsonl(
     
     Expected format: {"messages": [{"role": "user", "content": "..."}]}
     
-    If the prompt doesn't contain an explicit instruction to write a LinkedIn DM,
-    we append the standard instruction.
+    Each data point should be self-contained with task instructions, candidate profile,
+    and job description already baked in (from format_candidates.py).
+    
+    IMPORTANT: We pass through the content as-is to match the evaluator.
+    Do NOT add additional instructions - that would create a mismatch.
     """
     items: list[dict[str, Any]] = []
     for idx, record in enumerate(data):
@@ -389,7 +382,7 @@ def build_dataset_from_formatted_jsonl(
             logger.warning(f"Skipping record {idx}: no messages found")
             continue
         
-        # Get the user message content (the formatted prompt)
+        # Get the user message content (already has instructions baked in)
         user_message = next(
             (m for m in messages if m.get("role") == "user"),
             None
@@ -402,20 +395,6 @@ def build_dataset_from_formatted_jsonl(
         if not prompt:
             logger.warning(f"Skipping record {idx}: empty content")
             continue
-        
-        # Check if prompt already has an instruction for what to write
-        # If not, append the LinkedIn DM instruction
-        prompt_lower = prompt.lower()
-        has_instruction = any(keyword in prompt_lower for keyword in [
-            "write a linkedin",
-            "write a personalized",
-            "write a professional message",
-            "craft a message",
-            "compose a message",
-        ])
-        
-        if not has_instruction:
-            prompt = LINKEDIN_DM_INSTRUCTION + "\n\n" + prompt
         
         # Extract metadata from prompt content
         name = "Unknown"
