@@ -46,6 +46,7 @@ import json
 import logging
 import math
 import os
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -316,6 +317,7 @@ def load_recruiting_problems(
     candidates_path: str | Path | None = None,
     split: Literal["train", "test"] = "train",
     limit: int | None = None,
+    split_seed: int = 42,
 ) -> list[dict[str, Any]] | None:
     """Load recruiting candidate profiles as problem dicts.
 
@@ -326,8 +328,9 @@ def load_recruiting_problems(
 
     Args:
         candidates_path: Path to JSONL file. Defaults to candidates_formatted.jsonl.
-        split: 'train' uses first 80%, 'test' uses last 20%.
+        split: 'train' uses first 80%, 'test' uses last 20% after seeded shuffle.
         limit: Optional limit on number of problems.
+        split_seed: Random seed for reproducible train/test split. Default 42.
 
     Returns:
         List of {"question": prompt} dicts, or None on error.
@@ -350,10 +353,14 @@ def load_recruiting_problems(
                 if line:
                     records.append(json.loads(line))
 
-        # Split into train/test (80/20) - deterministic split based on file order
-        # Train: first 80% (indices 0 to split_idx-1)
-        # Test: last 20% (indices split_idx to end)
+        # Shuffle with fixed seed for reproducible random split
+        # This ensures all runs get the same train/test split
         total_count = len(records)
+        rng = random.Random(split_seed)
+        records = records.copy()  # Don't mutate original
+        rng.shuffle(records)
+
+        # Split into train/test (80/20)
         split_idx = int(total_count * 0.8)
         if split == "train":
             records = records[:split_idx]
@@ -371,8 +378,7 @@ def load_recruiting_problems(
                 problems.append({"question": user_msg["content"]})
 
         logger.info(
-            f"Loaded {len(problems)} recruiting problems ({split} split: "
-            f"{'indices 0-' + str(split_idx-1) if split == 'train' else 'indices ' + str(split_idx) + '-' + str(total_count-1)}) "
+            f"Loaded {len(problems)} recruiting problems ({split} split, seed={split_seed}) "
             f"from {candidates_path}"
         )
         return problems
@@ -808,9 +814,7 @@ async def main(cfg: Config):
     if not train_problems:
         raise ValueError(f"Could not load train split for {cfg.dataset_name} (empty or missing)")
 
-    # Shuffle
-    import random
-
+    # Shuffle training data order (separate from train/test split)
     rng = random.Random(cfg.seed)
     train_problems = train_problems.copy()
     rng.shuffle(train_problems)
