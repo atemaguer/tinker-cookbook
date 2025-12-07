@@ -5,12 +5,21 @@ Flow:
 - Dataset items contain a candidate profile and job description.
 - Sampling model generates a LinkedIn-style DM.
 - A grader model (OpenAI gpt-4.1 by default) scores the DM using rubric.json.
-- Grader is calibrated to be HARSH — most templated messages score <15.
+- Grader is calibrated to be VERY HARSH — most messages score 8-16.
 
 The rubric and candidate data are designed to be challenging:
-- Candidates have unique backgrounds, specific projects with metrics
-- ~25% are "edge cases" with location/seniority/domain mismatches
-- Rubric penalizes generic phrasing, copy-paste, and template language
+- ~55% of candidates are "edge cases" with subtle mismatches, red flags, or sparse profiles
+- Edge cases include: domain mismatches, outdated experience, job hoppers, sparse profiles
+- Rubric heavily penalizes surface-level personalization and template patterns
+- High scores (20+) require genuine insight, not just restating profile details
+- Even "perfect fit" candidates require nuanced messaging to score well
+
+Expected score distribution:
+- 0-5: Poor/template messages
+- 6-11: Weak, surface-level matching
+- 12-19: Adequate, where most decent messages land
+- 20-27: Strong, uncommon
+- 28-35: Exceptional, extremely rare
 
 Usage (example):
   python -m tinker_cookbook.eval.outreach_evaluator \
@@ -230,12 +239,18 @@ class OutboundEvaluator(SamplingClientEvaluator):
         return {"outreach_score": avg}
 
     def grade(self, dm: str, prompt: str) -> tuple[float, str, List[SectionScore], List[Penalty]]:
+        # Include grader instructions from rubric if available
+        grader_instructions = self.rubric.get("grader_instructions", "")
+        
         system_prompt = (
-            "You are a grader evaluating recruiter outreach messages. "
-            "Follow the provided rubric EXACTLY. Apply all applicable penalties.\n\n"
+            "You are a HARSH grader evaluating recruiter outreach messages. "
+            "Follow the provided rubric EXACTLY. Count specific criteria met and penalties triggered.\n\n"
+            f"{grader_instructions}\n\n"
             "Output JSON with:\n"
-            "- section_scores: array with one entry per rubric section (section_id, score, comments)\n"
-            "- penalties: array of penalties applied (reason, score as negative number), or empty array if none\n\n"
+            "- section_scores: array with one entry per rubric section (section_id, score, comments explaining which criteria were met)\n"
+            "- penalties: array of ALL applicable penalties (reason quoting the specific penalty, score as negative number), or empty array if none\n\n"
+            "Be literal: if you see template phrases like 'impressive background' or 'extensive experience', apply the penalty. "
+            "If the message doesn't explicitly acknowledge a mismatch, don't give credit for implying it.\n"
             "Do not include a total score. Do not add extra fields."
         )
         user_payload = {

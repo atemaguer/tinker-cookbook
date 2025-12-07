@@ -1,110 +1,131 @@
 {
-  "name": "Outbound LinkedIn DM Rubric (Hard Mode)",
-  "description": "Score an outbound LinkedIn DM. Designed to heavily penalize messages that ignore fundamental qualification mismatches. Max score ~30 before penalties. Most messages should score 10-18.",
+  "name": "Outbound LinkedIn DM Rubric (Diagnostic Style)",
+  "description": "Score an outbound LinkedIn DM using specific, testable criteria. Designed like a diagnostic rubric - checks for presence/absence of specific elements rather than subjective quality. Max ~45 points before penalties. Target distribution: most messages 8-18.",
+  
   "sections": [
     {
-      "id": "qualification_match",
-      "title": "Qualification & Fit Assessment",
-      "weight": 10,
+      "id": "fit_analysis",
+      "title": "Fit Analysis Accuracy",
       "criteria": [
-        "+4 explicitly acknowledges how candidate's background maps to role requirements",
-        "+3 identifies SPECIFIC transferable skills (not just 'your experience is relevant')",
-        "+3 addresses obvious gaps or mismatches honestly (if any exist)"
+        "+6: Identifies the SPECIFIC skill/experience from profile that maps to a SPECIFIC role requirement (not generic 'your experience fits')",
+        "+5: Explains HOW a listed accomplishment transfers to the role (mechanism, not just assertion)",
+        "+4: Acknowledges at least one gap, concern, or reason candidate might hesitate",
+        "+4: For edge cases only: explicitly addresses the mismatch (wrong domain, seniority, location, etc.)",
+        "+3: Distinguishes between directly relevant vs. transferable experience",
+        "+3: References something from the job description that connects to candidate's background",
+        "+2: Notes candidate's job search status or likely motivation based on profile signals"
       ],
       "penalties": [
-        "-8 ignores fundamental qualification mismatch (e.g., role requires PhD but candidate has BS)",
-        "-6 ignores domain mismatch (e.g., ML engineer for Finance Tutor role requiring CFA)",
-        "-5 ignores location/visa requirements when role is onsite-only",
-        "-4 ignores seniority mismatch (pitching IC role to VP, or senior role to 2-year candidate)"
+        "-8: Ignores fundamental qualification mismatch (e.g., no PhD when required, wrong domain entirely)",
+        "-6: States fit without ANY explanation of why/how (e.g., 'your background is perfect')",
+        "-6: Ignores obvious red flags: job hopping (3+ roles in 3 years), employment gaps, outdated experience (5+ years stale)",
+        "-5: Treats sparse/vague profile as if it contained detailed accomplishments",
+        "-4: Misreads profile (e.g., says 'your ML experience' when profile shows no ML)",
+        "-4: Ignores location/timezone/visa mismatch for onsite role"
       ]
     },
     {
-      "id": "personalization",
-      "title": "Genuine Personalization",
-      "weight": 8,
+      "id": "personalization_specificity", 
+      "title": "Personalization Specificity",
       "criteria": [
-        "+4 references a SPECIFIC achievement with concrete detail (metric, outcome, company)",
-        "+2 draws a non-obvious connection between candidate's work and role",
-        "+2 shows evidence of reading the profile (not just keyword extraction)"
+        "+5: Names a specific project, paper, company, or metric from profile (not just skills list)",
+        "+5: Explains WHY that specific detail matters for THIS role (not just that it exists)",
+        "+4: Makes a non-obvious connection (something that required inference, not keyword matching)",
+        "+3: References candidate's specialization or sub-domain accurately",
+        "+2: Acknowledges career trajectory or progression pattern",
+        "+2: Uses information that wouldn't appear in a generic search (deep profile read)"
       ],
       "penalties": [
-        "-6 generic phrases that could apply to anyone ('your impressive background')",
-        "-4 copy-pastes text from the candidate profile without adding insight",
-        "-3 mentions skills without explaining why they matter for THIS role",
-        "-2 uses name but nothing else specific"
+        "-8: Uses filler phrases: 'your impressive background', 'your extensive experience', 'your expertise in X'",
+        "-6: Only personalization is candidate's name",
+        "-5: Lists profile keywords without connecting them to role",
+        "-5: Copy-pastes or paraphrases profile text verbatim",
+        "-4: Personalization could apply to anyone in same field (e.g., 'as a data scientist, you know...')",
+        "-3: Gets a detail wrong (wrong company name, wrong specialization, wrong credential)"
       ]
     },
     {
-      "id": "value_prop",
-      "title": "Value Proposition",
-      "weight": 6,
+      "id": "value_proposition",
+      "title": "Role-Specific Value Proposition",
       "criteria": [
-        "+3 explains what makes THIS role uniquely interesting (not generic 'great company')",
-        "+2 addresses likely candidate concerns proactively",
-        "+1 mentions specific opportunities (growth, impact, technical challenge)"
+        "+4: States something specific about THIS role (not generic company pitch)",
+        "+3: Connects role specifics to candidate's likely interests based on profile",
+        "+3: Addresses a likely objection or concern candidate would have",
+        "+2: Mentions concrete opportunity: specific challenge, project, growth path, or impact"
       ],
       "penalties": [
-        "-4 generic company boilerplate ('fast-paced', 'innovative', 'cutting-edge')",
-        "-2 value prop could apply to any company/role"
+        "-5: Uses generic startup buzzwords: 'fast-paced', 'innovative', 'cutting-edge', 'mission-driven', 'disrupting'",
+        "-4: Value prop could describe any company/role (interchangeable)",
+        "-3: No attempt to explain why candidate should care",
+        "-3: Oversells with hyperbole: 'incredible opportunity', 'amazing team', 'revolutionizing'"
       ]
     },
     {
-      "id": "call_to_action",
-      "title": "Call to Action",
-      "weight": 3,
+      "id": "communication_quality",
+      "title": "Communication Quality",
       "criteria": [
-        "+2 clear, specific CTA",
-        "+1 low-friction ask (quick call, not 'send resume')"
+        "+3: Has clear, specific, low-friction CTA (e.g., '15-min call' not 'send your resume')",
+        "+2: Appropriate length: 60-130 words",
+        "+2: Sounds like a human wrote it for this person (not template)",
+        "+1: Appropriate tone for LinkedIn (professional but not stiff)"
       ],
       "penalties": [
-        "-2 no clear CTA or multiple conflicting asks"
-      ]
-    },
-    {
-      "id": "tone",
-      "title": "Tone & Authenticity",
-      "weight": 3,
-      "criteria": [
-        "+1 sounds human, not templated",
-        "+1 appropriate confidence level",
-        "+1 appropriate formality for LinkedIn"
-      ],
-      "penalties": [
-        "-3 obviously templated language patterns",
-        "-2 desperate/pushy tone",
-        "-2 excessive flattery or buzzwords"
+        "-5: Obviously templated (fill-in-the-blank structure, recognizable patterns)",
+        "-4: Excessive flattery: 'I was blown away', 'incredibly impressed', 'outstanding'", 
+        "-3: No CTA or unclear next step",
+        "-3: Over 150 words (wall of text)",
+        "-2: Under 40 words (too thin)",
+        "-2: Desperate/pushy tone or multiple asks"
       ]
     }
   ],
+
   "global_penalties": [
-    "-10 hallucinated facts about candidate (wrong company, fake project, wrong name)",
-    "-8 hallucinated facts about role (wrong title, made-up requirements)",
-    "-6 message ignores that candidate likely doesn't meet core requirements",
-    "-4 message is clearly a template with blanks filled in",
-    "-3 over 150 words (LinkedIn DMs should be scannable)",
-    "-2 under 40 words (too brief to be compelling)"
+    "-12: Hallucinated facts about candidate (wrong company, fake project, wrong name, invented credential)",
+    "-10: Hallucinated facts about role (wrong title, made-up requirements, wrong company details)",
+    "-8: Message could be sent to almost anyone with <5 word changes (template test)",
+    "-6: Complete failure to acknowledge why reaching out despite clear mismatch",
+    "-5: Claims to be 'impressed' or 'excited' by sparse/vague profile with no real content"
   ],
-  "calibration_examples": [
-    {
-      "scenario": "Finance Tutor role (requires PhD Economics) sent to ML Engineer with MS CS",
-      "bad_message": "Hi! Your experience with PyTorch and distributed systems is impressive. We're hiring Finance Tutors at xAI!",
-      "why_bad": "Completely ignores that candidate has zero finance/economics background and the role requires a PhD in Economics. Score: 2-5",
-      "good_message": "Hi - I know this is unconventional, but xAI's Finance Tutor role involves teaching AI models, not traditional tutoring. Your ML background could bring a unique perspective to how we structure financial reasoning problems. Would you be open to a quick chat about whether this could be interesting?",
-      "why_good": "Acknowledges the mismatch, explains why it might still work, gives candidate context. Score: 18-22"
+
+  "scoring_calibration": {
+    "perfect_fit_candidate": {
+      "description": "PhD Economist, 15 years at Fed, published, for Economics Tutor role",
+      "weak_response_example": "Your economics background and PhD make you a great fit for our tutor role!",
+      "weak_response_score": "6-10 (generic fit statement, no specific connection, no acknowledgment of what might concern them)",
+      "strong_response_example": "Your Fed testimony work caught my eye - translating monetary policy for Congress requires exactly the kind of explanation skill we need for AI tutoring. The role is quite different from academic research though - happy to share more if you're curious whether it'd be interesting.",
+      "strong_response_score": "22-28 (specific accomplishment + why it matters + acknowledges they might need convincing)"
     },
-    {
-      "scenario": "Senior SRE role (5+ years required) sent to 2-year junior engineer",
-      "bad_message": "Your infrastructure experience is exactly what we need for our Senior SRE role!",
-      "why_bad": "Ignores that candidate has 2 years experience vs 5+ required. Score: 3-6",
-      "good_message": "Hi - I noticed you've done impressive work on Kubernetes in your 2 years at Datadog. Our Senior SRE role typically needs 5+ years, but we sometimes make exceptions for strong candidates. Would you be interested in a conversation about the role and whether the fit could work?",
-      "why_good": "Honest about the gap, explains why reaching out anyway. Score: 16-20"
+    "sparse_profile_candidate": {
+      "description": "Just 'Data Scientist, 5 years, MS Statistics' - minimal info",
+      "weak_response_example": "Your data science experience is impressive! You'd be great for our ML role.",
+      "weak_response_score": "2-6 (pretends sparse profile is impressive, no acknowledgment of limited info)",
+      "strong_response_example": "Honest caveat: your profile is light on details, so I'm guessing a bit. If your DS work involved production ML systems (vs pure analysis), our ML Engineer role might fit. Open to a quick call to see if there's alignment?",
+      "strong_response_score": "16-22 (acknowledges limited info, explains what would make it fit, appropriate uncertainty)"
+    },
+    "red_flag_candidate": {
+      "description": "5 jobs in 4 years, most recent 8 months",
+      "weak_response_example": "Your diverse experience shows great adaptability!",
+      "weak_response_score": "0-5 (spins red flag as positive, doesn't address it)",
+      "strong_response_example": "I noticed you've moved around recently - before reaching out, wanted to be upfront that we're looking for someone to own a 2+ year roadmap. If the moves were circumstantial vs preference, would love to hear what you're looking for next.",
+      "strong_response_score": "18-24 (addresses red flag directly, gives candidate chance to explain)"
+    },
+    "domain_mismatch_candidate": {
+      "description": "Computer vision PhD for LLM role",
+      "weak_response_example": "Your ML research would be great for our LLM team!",
+      "weak_response_score": "4-8 (ignores that CV ≠ LLM)",
+      "strong_response_example": "Your work is in vision, so this is a cross-domain reach. That said, your distributed training papers suggest optimization intuition that transfers. If you're open to pivoting, happy to discuss what ramping into LLMs looks like here.",
+      "strong_response_score": "20-26 (acknowledges mismatch, identifies specific transferable skill, explains rationale)"
     }
-  ],
+  },
+
   "scoring_guidance": {
-    "25-30": "Exceptional. Handles any mismatches elegantly, genuinely personalized, compelling value prop. VERY RARE.",
-    "18-24": "Good. Acknowledges candidate's actual background, addresses fit thoughtfully, specific details.",
-    "12-17": "Mediocre. Some personalization but misses key fit issues or uses generic language.",
-    "6-11": "Poor. Template-like, ignores obvious qualification gaps, generic phrases.",
-    "0-5": "Spam. Could be sent to anyone, ignores everything about the candidate's actual background."
-  }
+    "30-45": "Exceptional. Hits most positive criteria, avoids penalties, demonstrates genuine insight. VERY RARE.",
+    "20-29": "Strong. Multiple specific connections, acknowledges complexity, few penalties. Should be uncommon.",
+    "12-19": "Adequate. Some specific personalization but misses connections or triggers minor penalties. Most decent attempts.",
+    "6-11": "Weak. Generic language, surface matching, or ignores fit issues.",
+    "0-5": "Poor. Template-like, hallucinations, or major red flag oversights."
+  },
+
+  "grader_instructions": "Score by COUNTING specific criteria met and penalties triggered. Be literal - if the message doesn't explicitly acknowledge a mismatch, don't give credit for 'implying' it. If you see template phrases from the penalty list, apply the penalty. Most messages from capable models should score 10-18. Scores above 25 require genuinely insightful connections."
 }

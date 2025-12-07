@@ -616,11 +616,19 @@ def build_legal_tutor_profile() -> Dict[str, Any]:
 # =============================================================================
 
 EDGE_CASE_TYPES = [
-    "overqualified",      # Director applying for IC role
-    "underqualified",     # Missing key requirement (e.g., no PhD for tutor role)
-    "career_changer",     # Different domain but transferable skills
-    "location_mismatch",  # Wrong location/timezone
-    "seniority_gap",      # Wrong level for the role
+    "overqualified",          # Director applying for IC role
+    "underqualified",         # Missing key requirement (e.g., no PhD for tutor role)
+    "career_changer",         # Different domain but transferable skills
+    "location_mismatch",      # Wrong location/timezone
+    "seniority_gap",          # Wrong level for the role
+    # --- NEW: Harder edge cases ---
+    "domain_mismatch_subtle", # Impressive credentials in adjacent-but-wrong domain
+    "sparse_profile",         # Minimal info - forces LLM to work with less
+    "red_flags",              # Job hopping, buzzword-heavy, unexplained gaps
+    "impressive_but_irrelevant",  # Great accomplishments that don't transfer
+    "outdated_experience",    # Relevant experience but 5+ years stale
+    "overly_academic",        # PhD researcher with no industry/applied experience
+    "wrong_specialization",   # Right field, wrong sub-specialty for the role
 ]
 
 
@@ -679,6 +687,157 @@ def apply_edge_case(profile: Dict[str, Any], edge_type: str, role: Dict[str, Any
             profile["seniority"] = "Director/VP level"
             profile["edge_case_note"] = "Very senior candidate for entry/mid role"
     
+    # --- NEW HARDER EDGE CASES ---
+    
+    elif edge_type == "domain_mismatch_subtle":
+        # Impressive credentials but in adjacent-but-wrong domain
+        # e.g., PhD computational biology for a pure math tutor role
+        original_domain = profile.get("domain", "unknown")
+        adjacent_domains = {
+            "finance": ["economics research (not trading)", "data science (no finance)", "statistics (academic)"],
+            "biology": ["bioinformatics (no wet lab)", "computational modeling (no biology)", "chemistry (no bio)"],
+            "chemistry": ["materials science", "chemical engineering (process, not synthesis)", "physics"],
+            "physics": ["applied math", "engineering physics", "astronomy (observational)"],
+            "math": ["computer science theory", "statistics (applied)", "quantitative social science"],
+            "ml_engineering": ["academic ML research (no production)", "data science (no ML ops)", "software (no ML)"],
+            "backend_engineering": ["data engineering (no backend)", "devops (no coding)", "QA automation"],
+            "infrastructure": ["software engineering (no infra)", "security (no SRE)", "networking (no cloud)"],
+        }
+        adjacent = adjacent_domains.get(original_domain, ["adjacent field"])
+        profile["specialization"] = random.choice(adjacent)
+        profile["edge_case_note"] = f"Subtle domain mismatch: {original_domain} background but specialization is {profile['specialization']}"
+        # Remove some relevant skills
+        if profile.get("skills"):
+            profile["skills"] = profile["skills"][:2] + ["Adjacent skill not directly applicable"]
+    
+    elif edge_type == "sparse_profile":
+        # Minimal information - forces LLM to work with less
+        profile["highlights"] = [random.choice(profile.get("highlights", ["Experience in field"]))]
+        profile["publications"] = []
+        profile["skills"] = random.sample(profile.get("skills", []), k=min(2, len(profile.get("skills", []))))
+        profile["specialization"] = ""  # Remove specialization
+        profile["education"] = profile.get("education", "").split(",")[0]  # Just degree, no school
+        profile["edge_case_note"] = "Sparse profile - minimal information to work with"
+    
+    elif edge_type == "red_flags":
+        # Job hopping, buzzword-heavy, unexplained gaps
+        red_flag_type = random.choice(["job_hopper", "buzzword_heavy", "gaps", "vague_accomplishments"])
+        
+        if red_flag_type == "job_hopper":
+            profile["experience_years"] = random.randint(6, 10)
+            profile["highlights"] = [
+                f"5 roles in {profile['experience_years']} years",
+                "Most recent tenure: 8 months",
+                random.choice(profile.get("highlights", ["Worked on various projects"])),
+            ]
+            profile["edge_case_note"] = "Red flag: Job hopper - 5 roles in short period"
+        
+        elif red_flag_type == "buzzword_heavy":
+            profile["highlights"] = [
+                "Leveraged synergies to drive innovation and stakeholder alignment",
+                "Passionate about disrupting paradigms with cutting-edge solutions",
+                "Strategic thought leader with proven track record of excellence",
+            ]
+            profile["skills"] = ["Thought Leadership", "Strategic Vision", "Change Management", "Stakeholder Engagement"]
+            profile["edge_case_note"] = "Red flag: Buzzword-heavy profile with no concrete accomplishments"
+        
+        elif red_flag_type == "gaps":
+            profile["highlights"] = [
+                f"Last role ended {random.randint(2, 4)} years ago",
+                "Currently taking time off",
+                random.choice(profile.get("highlights", ["Prior experience in field"])),
+            ]
+            profile["edge_case_note"] = "Red flag: Significant employment gap"
+        
+        else:  # vague_accomplishments
+            profile["highlights"] = [
+                "Worked on important projects",
+                "Contributed to team success",
+                "Helped improve processes",
+            ]
+            profile["edge_case_note"] = "Red flag: Vague accomplishments with no metrics or specifics"
+    
+    elif edge_type == "impressive_but_irrelevant":
+        # Great accomplishments that don't transfer
+        irrelevant_highlights = {
+            "finance": [
+                "Olympic gold medalist in swimming",
+                "Published novelist with 3 NYT bestsellers",
+                "Founded successful restaurant chain (10 locations)",
+            ],
+            "ml_engineering": [
+                "Professional poker player (WSOP finalist)",
+                "Real estate investor ($50M portfolio)",
+                "Former professional athlete (5 years NFL)",
+            ],
+            "default": [
+                "YouTube channel with 2M subscribers (cooking content)",
+                "Built and sold e-commerce business for $5M",
+                "Competitive chess grandmaster",
+            ],
+        }
+        domain = profile.get("domain", "default")
+        irrelevant = irrelevant_highlights.get(domain, irrelevant_highlights["default"])
+        # Keep one relevant highlight, add irrelevant ones
+        original_highlight = profile.get("highlights", ["Experience"])[0] if profile.get("highlights") else "Some experience"
+        profile["highlights"] = [original_highlight] + random.sample(irrelevant, k=2)
+        profile["edge_case_note"] = "Impressive but irrelevant accomplishments - great achievements that don't transfer"
+    
+    elif edge_type == "outdated_experience":
+        # Relevant experience but 5+ years stale
+        years_ago = random.randint(5, 12)
+        profile["highlights"] = [
+            f"Left {profile.get('domain', 'the field')} {years_ago} years ago",
+            f"Recent work: {random.choice(['consulting', 'teaching', 'startup founder (different domain)', 'sabbatical'])}",
+            f"Core experience is from {2024 - years_ago - profile.get('experience_years', 5)}-{2024 - years_ago}",
+        ]
+        profile["current_title"] = random.choice([
+            "Independent Consultant",
+            "Startup Founder (stealth)",
+            "Career Break",
+            f"Adjunct Professor (teaching {profile.get('domain', 'various topics')})",
+        ])
+        profile["edge_case_note"] = f"Outdated experience - relevant work was {years_ago}+ years ago"
+    
+    elif edge_type == "overly_academic":
+        # PhD researcher with no industry/applied experience
+        profile["experience_years"] = random.randint(8, 15)
+        profile["current_title"] = f"Associate Professor at {random.choice(['State University', 'Regional College', 'Community College'])}"
+        profile["highlights"] = [
+            f"{profile['experience_years']} years in academia only - no industry experience",
+            "Published 40+ papers (citation count: 150)",
+            "Never worked outside university setting",
+            "Teaching load: 4 courses per semester",
+        ]
+        profile["skills"] = [s for s in profile.get("skills", []) if s not in ["Python", "Production Systems", "Kubernetes"]]
+        profile["skills"].extend(["Academic Writing", "Grant Applications", "Committee Service"])
+        profile["edge_case_note"] = "Overly academic - extensive research but zero industry/applied experience"
+    
+    elif edge_type == "wrong_specialization":
+        # Right field, wrong sub-specialty
+        wrong_specs = {
+            "finance": {
+                "for_quant_role": ["retail banking", "compliance", "wealth management (HNW individuals)"],
+                "for_tutor_role": ["sales & trading (no research)", "investment banking (M&A, not analysis)", "private banking"],
+            },
+            "ml_engineering": {
+                "for_llm_role": ["computer vision only", "robotics/controls", "speech (not text)"],
+                "for_infra_role": ["research only (no systems)", "NLP theory (no production)", "RL for games"],
+            },
+            "biology": {
+                "for_molecular_role": ["ecology/field biology", "marine biology", "evolutionary biology (no lab)"],
+                "for_tutor_role": ["agricultural science", "forensic biology", "wildlife conservation"],
+            },
+        }
+        domain = profile.get("domain", "")
+        if domain in wrong_specs:
+            spec_category = random.choice(list(wrong_specs[domain].keys()))
+            profile["specialization"] = random.choice(wrong_specs[domain][spec_category])
+            profile["edge_case_note"] = f"Wrong specialization: {domain} background but specializes in {profile['specialization']} (not what role needs)"
+        else:
+            profile["specialization"] = "tangentially related subspecialty"
+            profile["edge_case_note"] = "Wrong specialization within the field"
+    
     return profile
 
 
@@ -717,8 +876,12 @@ def build_profile_for_role_category(category: str) -> Dict[str, Any]:
         return build_backend_engineer_profile()
 
 
-def build_candidate(role: Dict[str, Any], cid: int, edge_case_pct: float = 0.30) -> Dict[str, Any]:
-    """Build a candidate with appropriate (or intentionally mismatched) background."""
+def build_candidate(role: Dict[str, Any], cid: int, edge_case_pct: float = 0.55) -> Dict[str, Any]:
+    """Build a candidate with appropriate (or intentionally mismatched) background.
+    
+    Default edge_case_pct increased to 0.55 (was 0.30) to create more challenging
+    eval scenarios. Real recruiting involves many imperfect-fit candidates.
+    """
     
     role_title = role.get("title", "")
     category = classify_role(role_title)
@@ -728,7 +891,12 @@ def build_candidate(role: Dict[str, Any], cid: int, edge_case_pct: float = 0.30)
     edge_type = None
     
     if is_edge_case:
-        edge_type = random.choice(EDGE_CASE_TYPES)
+        # Weight newer/harder edge cases more heavily
+        weighted_types = (
+            EDGE_CASE_TYPES[:5]  # Original types
+            + EDGE_CASE_TYPES[5:] * 2  # New harder types appear 2x as often
+        )
+        edge_type = random.choice(weighted_types)
     
     # Generate base profile appropriate for the role
     profile = build_profile_for_role_category(category)
@@ -835,7 +1003,7 @@ def main():
     parser.add_argument("--formatted", type=Path, default=DEFAULT_FORMATTED)
     parser.add_argument("--count", type=int, default=50, help="Number of candidates to generate")
     parser.add_argument("--seed", type=int, default=None, help="Random seed (default: random)")
-    parser.add_argument("--edge-case-pct", type=float, default=0.30, help="Fraction of edge case candidates")
+    parser.add_argument("--edge-case-pct", type=float, default=0.55, help="Fraction of edge case candidates (default raised to create harder evals)")
     parser.add_argument("--replace", action="store_true", help="Replace existing candidates instead of appending")
     args = parser.parse_args()
 
