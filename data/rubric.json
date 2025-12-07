@@ -1,0 +1,77 @@
+{
+  "name": "Outbound LinkedIn DM Rubric for xAI Roles",
+  "description": "Score an outbound LinkedIn DM inviting a candidate to consider an xAI role. Input = {candidate_profile, job_description, message}. Output = JSON with per-section scores, comments, and total.",
+  "sections": [
+    {
+      "id": "relevance_fit",
+      "title": "Relevance & Fit",
+      "weight": 10,
+      "criteria": [
+        "+4 references role-specific skills/keywords from the JD (model type, infra, domain, stack)",
+        "+3 aligns location/onsite/remote constraints from JD",
+        "+3 matches seniority/scope implied in JD"
+      ],
+      "penalties": [
+        "-3 location/eligibility mismatch",
+        "-2 wrong seniority"
+      ]
+    },
+    {
+      "id": "personalization",
+      "title": "Personalization",
+      "weight": 8,
+      "criteria": [
+        "+5 cites candidate-specific experience/project/skill (not generic)",
+        "+3 calls out domain match (e.g., LLM infra, RL, safety, networking, tutoring domain)"
+      ],
+      "penalties": [
+        "-2 generic mass-mail tone ('Dear Sir/Madam', 'To whom it may concern')"
+      ]
+    },
+    {
+      "id": "value_prop",
+      "title": "Value Proposition",
+      "weight": 7,
+      "criteria": [
+        "+4 explains why xAI/this role is attractive (mission, impact, tech stack, scope)",
+        "+3 mentions growth/ownership/comp or unique challenges"
+      ]
+    },
+    {
+      "id": "call_to_action",
+      "title": "Call to Action",
+      "weight": 4,
+      "criteria": [
+        "+4 clear, low-friction CTA (short chat or link to apply)"
+      ]
+    },
+    {
+      "id": "tone",
+      "title": "Tone & Professionalism",
+      "weight": 4,
+      "criteria": [
+        "+2 concise, respectful, confident (not pushy)",
+        "+2 avoids hype/spammy phrasing"
+      ]
+    },
+    {
+      "id": "clarity",
+      "title": "Structure & Clarity",
+      "weight": 4,
+      "criteria": [
+        "+2 readable formatting (short paragraphs or bullets)",
+        "+2 no fluff; stays on-topic"
+      ],
+      "penalties": [
+        "-2 overlong (>180 words) or wall of text"
+      ]
+    }
+  ],
+  "global_penalties": [
+    "-4 hallucinated facts about candidate or role",
+    "-3 location/eligibility mismatch (if not already counted)",
+    "-2 wrong seniority (if not already counted)"
+  ],
+  "scoring_notes": "Score each section 0–weight. Apply penalties where relevant (can drive section below zero but not below -weight). Sum sections plus penalties to total. Return JSON: {section_scores: {id: {score, comments}}, penalties: [...applied...], total_score}."
+}
+
