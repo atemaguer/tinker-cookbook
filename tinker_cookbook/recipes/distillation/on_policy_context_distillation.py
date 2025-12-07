@@ -87,7 +87,6 @@ from tinker_cookbook.utils.trace import get_scope_context, scope, trace_init
 # Import evaluator
 from tinker_cookbook.eval.outreach_evaluator import (
     OutboundEvaluator,
-    build_dataset_from_formatted_jsonl as build_eval_dataset,
     load_json as load_rubric,
 )
 
@@ -495,7 +494,8 @@ def load_recruiting_problems(
             logger.warning(f"Expected list of candidates, got {type(data)}")
             return None
 
-        # Split into train/test (80/20)
+        # Split into train/test (80/20) - deterministic split, no shuffle here
+        # Shuffling for training variety happens in main() after loading
         split_idx = int(len(data) * 0.8)
         if split == "train":
             data = data[:split_idx]
@@ -839,41 +839,45 @@ async def main(cfg: Config):
     # IMPORTANT: Use test split (last 20%) to avoid evaluating on training data
     evaluator = None
     rubric_path = Path(cfg.rubric_path) if cfg.rubric_path else DEFAULT_RUBRIC_PATH
-    candidates_path = Path(cfg.candidates_path) if cfg.candidates_path else DEFAULT_CANDIDATES_PATH
     
-    if rubric_path.exists() and candidates_path.exists():
+    if rubric_path.exists():
         try:
             rubric = load_rubric(rubric_path)
             
-            # Load ALL examples first, then take test split (last 20%)
-            all_eval_data = build_eval_dataset(candidates_path, limit=None)
-            split_idx = int(len(all_eval_data) * 0.8)
-            test_data = all_eval_data[split_idx:]  # Use test split
-            
-            # Apply eval_limit to test set
-            if cfg.eval_limit is not None and cfg.eval_limit < len(test_data):
-                test_data = test_data[:cfg.eval_limit]
-            
-            renderer_name = model_info.get_recommended_renderer_name(cfg.model_name)
-            
-            evaluator = OutboundEvaluator(
-                dataset=test_data,
-                rubric=rubric,
-                renderer_name=renderer_name,
-                model_name=cfg.model_name,
-                max_tokens=cfg.max_tokens,
-                temperature=cfg.temperature,
-                verbose=False,  # Don't print individual results during training
+            # Load test split using same function as training (ensures consistent split)
+            test_problems = load_recruiting_problems(
+                candidates_path=cfg.candidates_path,
+                roles_path=cfg.roles_path,
+                split="test",
             )
-            logger.info(f"Created evaluator with {len(test_data)} examples from TEST split of {candidates_path}")
+            
+            if test_problems:
+                # Convert from training format {"question": ...} to eval format {"prompt": ...}
+                test_data = [{"prompt": p["question"]} for p in test_problems]
+                
+                # Apply eval_limit to test set
+                if cfg.eval_limit is not None and cfg.eval_limit < len(test_data):
+                    test_data = test_data[:cfg.eval_limit]
+                
+                renderer_name = model_info.get_recommended_renderer_name(cfg.model_name)
+                
+                evaluator = OutboundEvaluator(
+                    dataset=test_data,
+                    rubric=rubric,
+                    renderer_name=renderer_name,
+                    model_name=cfg.model_name,
+                    max_tokens=cfg.max_tokens,
+                    temperature=cfg.temperature,
+                    verbose=False,  # Don't print individual results during training
+                )
+                logger.info(f"Created evaluator with {len(test_data)} examples from TEST split")
+            else:
+                logger.warning("No test data available for evaluation")
         except Exception as e:
             logger.warning(f"Failed to create evaluator: {e}")
             evaluator = None
     else:
-        if not rubric_path.exists():
-            logger.warning(f"Rubric not found at {rubric_path}, skipping eval")
-        if not candidates_path.exists():
-            logger.warning(f"Candidates not found at {candidates_path}, skipping eval")
+        logger.warning(f"Rubric not found at {rubric_path}, skipping eval")
 
     # Initial sampling client
     sampling_client, _ = await save_checkpoint_and_get_sampling_client(
